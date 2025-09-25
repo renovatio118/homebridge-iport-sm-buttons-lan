@@ -253,8 +253,11 @@ class IPortSMButtonsPlatform {
               this.log(`Error getting state for ${id}: ${err.message}`);
               return;
             }
+            const hue = typeof state.hue === 'number' ? state.hue : 0;
+            const saturation = typeof state.saturation === 'number' ? state.saturation : 0;
+            const kelvin = typeof state.kelvin === 'number' ? state.kelvin : 3500;
             const brightness = Math.max(0, Math.min(1, action.value / 100));
-            bulb.color(state.hue, state.saturation, brightness, state.kelvin, 350, 0);
+            bulb.color(hue, saturation, brightness, kelvin, 350, 0);
             this.log(`Set LIFX ${id} brightness to ${action.value}%`);
           });
           break;
@@ -264,6 +267,7 @@ class IPortSMButtonsPlatform {
     });
   }
 
+  // ---------------- LED methods ----------------
   cycleLEDColor() {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
@@ -287,28 +291,23 @@ class IPortSMButtonsPlatform {
     return 'unknown';
   }
 
-  // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
     try {
       this.socket.write(cmd);
       this.ledColor = { r, g, b };
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 
   queryLED() {
     if (!this.connected || this.isShuttingDown) return;
     try {
       this.socket.write('\rled=?\r');
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 
-  // ---------------- Homebridge Accessory exposure ----------------
+  // ---------------- Homebridge ----------------
   accessories(callback) {
     this.log('Setting up dummy accessories (for buttons only)');
     try {
@@ -339,7 +338,6 @@ class IPortSMButtonsPlatform {
     this.accessory = accessory;
   }
 
-  // ---------------- HTTP Debug Server ----------------
   startDirectControlServer() {
     this.app.post('/action/button/:buttonNumber', (req, res) => {
       const buttonNumber = parseInt(req.params.buttonNumber, 10);
