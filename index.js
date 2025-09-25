@@ -294,11 +294,18 @@ class IPortSMButtonsPlatform {
     this.log(`Executing action for button ${buttonNumber}: ${JSON.stringify(actionToExecute)}`);
 
     if (actionToExecute.actionType === 'accessory') {
-      this.executeHomeKitAction(actionToExecute);
+      // Handle multiple targetNames
+      const targetNames = Array.isArray(actionToExecute.targetName) ? actionToExecute.targetName : [actionToExecute.targetName];
+      targetNames.forEach(targetName => {
+        if (!targetName) {
+          this.log('Skipping empty targetName');
+          return;
+        }
+        this.executeHomeKitAction({ ...actionToExecute, targetName });
+      });
     } else if (actionToExecute.actionType === 'led') {
       this.executeLedAction(actionToExecute);
     } else if (actionToExecute.actionType === 'scene') {
-      // For scenes, use virtual switch (unavoidable for triggering HomeKit scenes)
       const mappingKey = this.getMappingKey(actionToExecute);
       const vSwitch = this.mappingSwitches[mappingKey];
       if (vSwitch) {
@@ -385,29 +392,69 @@ class IPortSMButtonsPlatform {
       return;
     }
 
-    const onCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.On);
-    if (!onCharacteristic) {
-      this.log(`No On characteristic found on accessory "${action.targetName}"`);
-      return;
-    }
-
-    switch (action.action) {
-      case 'toggle': {
-        const currentState = onCharacteristic.value;
-        try { onCharacteristic.setValue(!currentState); } catch (e) {}
-        this.log(`Toggled ${action.targetName} to ${!currentState ? 'on' : 'off'}`);
-        break;
+    if (action.action === 'brightness') {
+      const brightnessCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.Brightness);
+      if (!brightnessCharacteristic) {
+        this.log(`No Brightness characteristic found on accessory "${action.targetName}"`);
+        return;
       }
-      case 'on':
-        try { onCharacteristic.setValue(true); } catch (e) {}
-        this.log(`Turned on ${action.targetName}`);
-        break;
-      case 'off':
-        try { onCharacteristic.setValue(false); } catch (e) {}
-        this.log(`Turned off ${action.targetName}`);
-        break;
-      default:
-        this.log(`Unknown action: ${action.action}`);
+      const value = action.value;
+      if (typeof value !== 'number' || value < 0 || value > 100) {
+        this.log(`Invalid brightness value for "${action.targetName}": ${value}`);
+        return;
+      }
+      try {
+        brightnessCharacteristic.setValue(value);
+        this.log(`Set brightness of ${action.targetName} to ${value}%`);
+      } catch (e) {
+        this.log(`Error setting brightness of ${action.targetName}: ${e.message}`);
+      }
+      // Ensure the accessory is turned on when setting brightness
+      const onCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.On);
+      if (onCharacteristic && !onCharacteristic.value) {
+        try {
+          onCharacteristic.setValue(true);
+          this.log(`Turned on ${action.targetName} to apply brightness`);
+        } catch (e) {
+          this.log(`Error turning on ${action.targetName}: ${e.message}`);
+        }
+      }
+    } else {
+      const onCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.On);
+      if (!onCharacteristic) {
+        this.log(`No On characteristic found on accessory "${action.targetName}"`);
+        return;
+      }
+      switch (action.action) {
+        case 'toggle': {
+          const currentState = onCharacteristic.value;
+          try {
+            onCharacteristic.setValue(!currentState);
+            this.log(`Toggled ${action.targetName} to ${!currentState ? 'on' : 'off'}`);
+          } catch (e) {
+            this.log(`Error toggling ${action.targetName}: ${e.message}`);
+          }
+          break;
+        }
+        case 'on':
+          try {
+            onCharacteristic.setValue(true);
+            this.log(`Turned on ${action.targetName}`);
+          } catch (e) {
+            this.log(`Error turning on ${action.targetName}: ${e.message}`);
+          }
+          break;
+        case 'off':
+          try {
+            onCharacteristic.setValue(false);
+            this.log(`Turned off ${action.targetName}`);
+          } catch (e) {
+            this.log(`Error turning off ${action.targetName}: ${e.message}`);
+          }
+          break;
+        default:
+          this.log(`Unknown action: ${action.action}`);
+      }
     }
   }
 
