@@ -294,9 +294,11 @@ class IPortSMButtonsPlatform {
     this.log(`Executing action for button ${buttonNumber}: ${JSON.stringify(actionToExecute)}`);
 
     if (actionToExecute.actionType === 'accessory') {
-      // Handle multiple targetNames
-      const targetNames = Array.isArray(actionToExecute.targetName) ? actionToExecute.targetName : [actionToExecute.targetName];
-      targetNames.forEach(targetName => {
+      if (!actionToExecute.targetName || !Array.isArray(actionToExecute.targetName)) {
+        this.log('No valid targetName array specified for accessory action');
+        return;
+      }
+      actionToExecute.targetName.forEach(targetName => {
         if (!targetName) {
           this.log('Skipping empty targetName');
           return;
