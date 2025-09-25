@@ -225,16 +225,16 @@ class IPortSMButtonsPlatform {
     }
   }
 
+  // ---------------- LIFX actions ----------------
   handleLifxAction(action) {
     const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
 
     ids.forEach(id => {
-      const lights = this.lifx.lights({ id });
-      if (!lights || lights.length === 0) {
-        this.log(`LIFX bulb ${id} not found`);
+      const bulb = this.lifx.light(id);
+      if (!bulb) {
+        this.log(`LIFX bulb ${id} not found (not discovered yet)`);
         return;
       }
-      const bulb = lights[0];
 
       switch (action.action) {
         case 'on':
@@ -248,7 +248,6 @@ class IPortSMButtonsPlatform {
             this.log(`Brightness action missing value for bulb ${id}`);
             break;
           }
-          // Keep hue/saturation/kelvin unchanged, only set brightness (0-1)
           bulb.getState((err, state) => {
             if (err) {
               this.log(`Error getting state for ${id}: ${err.message}`);
@@ -288,6 +287,7 @@ class IPortSMButtonsPlatform {
     return 'unknown';
   }
 
+  // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
@@ -339,6 +339,7 @@ class IPortSMButtonsPlatform {
     this.accessory = accessory;
   }
 
+  // ---------------- HTTP Debug Server ----------------
   startDirectControlServer() {
     this.app.post('/action/button/:buttonNumber', (req, res) => {
       const buttonNumber = parseInt(req.params.buttonNumber, 10);
