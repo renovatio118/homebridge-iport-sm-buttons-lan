@@ -1,7 +1,8 @@
 const net = require('net');
 const express = require('express');
+const LifxClient = require('node-lifx').Client;
 
-console.log('Loading iPortSMButtonsLAN plugin');
+console.log('Loading iPortSMButtonsLAN plugin (LIFX edition)');
 
 class IPortSMButtonsPlatform {
   constructor(log, config, api) {
@@ -17,9 +18,7 @@ class IPortSMButtonsPlatform {
     this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500; // ms
     this.directControlPort = this.config.directControlPort || 3000;
 
-    // runtime state
     this.buttonServices = [];
-    this.mappingSwitches = {}; // Only for scene mappings
     this.buttonStates = Array.from({ length: 10 }, () => ({ state: 0, lastPress: 0 }));
     this.ledColor = { r: 255, g: 255, b: 255 };
     this.connected = false;
@@ -27,15 +26,23 @@ class IPortSMButtonsPlatform {
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
     this.eventQueue = [];
-    this.lastRawData = null;
-    this.allAccessories = []; // Cache for all accessories
 
-    // HTTP server for direct control
+    // New: LIFX client
+    this.lifx = new LifxClient();
+    this.lifx.init();
+    this.lifx.on('light-new', light => {
+      this.log(`Discovered LIFX bulb: ${light.id} (${light.address})`);
+    });
+    this.lifx.on('error', err => {
+      this.log(`LIFX error: ${err.message}`);
+    });
+
+    // HTTP server for debug/manual control
     this.app = express();
     this.app.use(express.json());
     this.server = null;
 
-    // color mapping
+    // mode colors for iPort LED
     this.modeColors = {
       yellow: { r: 255, g: 255, b: 0 },
       red: { r: 255, g: 0, b: 0 },
@@ -44,7 +51,6 @@ class IPortSMButtonsPlatform {
       purple: { r: 128, g: 0, b: 128 },
       white: { r: 255, g: 255, b: 255 }
     };
-
     this.colorCycle = ['red', 'green', 'blue', 'yellow', 'purple', 'white'];
     this.currentColorIndex = 0;
 
@@ -56,89 +62,36 @@ class IPortSMButtonsPlatform {
       return;
     }
 
-    this.log('IPortSMButtonsPlatform initialized');
+    this.log('IPortSMButtonsPlatform initialized (LIFX only)');
 
-    // Start HTTP server
     this.startDirectControlServer();
-
-    // start connection immediately
     this.connect();
 
-    // create/register accessories after Homebridge finishes launching
     this.api.on('didFinishLaunching', () => {
       this.log('Homebridge finished launching');
-      this.accessories((accessories) => {
+      this.accessories(accs => {
         this.log('Registering accessories after didFinishLaunching');
-        this.api.registerPlatformAccessories('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', accessories);
+        this.api.registerPlatformAccessories('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', accs);
       });
-      // Cache all accessories after launching
-      const hbServer = this.api._homebridge || this.api.server;
-      if (hbServer && hbServer.accessories && hbServer.accessories.accessories) {
-        this.allAccessories = Array.from(hbServer.accessories.accessories.values());
-        this.log(`Cached ${this.allAccessories.length} accessories`);
-      } else {
-        this.log('Failed to cache accessories - map not available');
-      }
       this.processQueuedEvents();
     });
 
-    // cleanup on shutdown
     this.api.on('shutdown', () => {
       this.isShuttingDown = true;
       this.log('Homebridge shutting down, closing socket and HTTP server');
       if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
       if (this.socket) this.socket.destroy();
       if (this.server) this.server.close();
+      try { this.lifx.destroy(); } catch (e) {}
     });
   }
 
-  startDirectControlServer() {
-    this.app.post('/action/button/:buttonNumber', (req, res) => {
-      const buttonNumber = parseInt(req.params.buttonNumber, 10);
-      if (isNaN(buttonNumber) || buttonNumber < 1 || buttonNumber > 10) {
-        return res.status(400).json({ error: 'Invalid button number (must be 1–10)' });
-      }
-      try {
-        this.log(`Direct control: Triggering action for button ${buttonNumber}`);
-        this.executeButtonAction(buttonNumber);
-        res.status(200).json({ success: true });
-      } catch (err) {
-        this.log(`Error in direct control for button ${buttonNumber}: ${err.message}`);
-        res.status(500).json({ error: err.message });
-      }
-    });
-
-    this.app.post('/action/led', (req, res) => {
-      const { r, g, b } = req.body;
-      if (r === undefined || g === undefined || b === undefined ||
-          r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
-        return res.status(400).json({ error: 'Invalid RGB values (must be 0–255)' });
-      }
-      try {
-        this.log(`Direct control: Setting LED to RGB(${r}, ${g}, ${b})`);
-        this.setLED(r, g, b);
-        res.status(200).json({ success: true });
-      } catch (err) {
-        this.log(`Error in direct LED control: ${err.message}`);
-        res.status(500).json({ error: err.message });
-      }
-    });
-
-    this.server = this.app.listen(this.directControlPort, '127.0.0.1', () => {
-      this.log(`Direct control HTTP server running on http://127.0.0.1:${this.directControlPort}`);
-    });
-
-    this.server.on('error', (err) => {
-      this.log(`HTTP server error: ${err.message}`);
-    });
-  }
-
+  // ---------------- iPort TCP connection ----------------
   connect() {
     if (!this.ip) {
       this.log.error('No IP configured for iPort device');
       return;
     }
-
     this.log(`Connecting to ${this.ip}:${this.port}`);
     this.socket = new net.Socket();
     this.socket.setTimeout(this.timeout);
@@ -146,28 +99,19 @@ class IPortSMButtonsPlatform {
     this.socket.connect(this.port, this.ip, () => {
       this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
-
       this.queryLED();
-
-      if (this.accessory && this.accessory.updateReachability) this.accessory.updateReachability(true);
-
       this.keepAliveInterval = setInterval(() => {
         if (this.connected && !this.isShuttingDown) this.queryLED();
       }, 5000);
     });
 
-    this.socket.on('data', (data) => {
-      if (this.isShuttingDown) return;
+    this.socket.on('data', data => {
       const str = data.toString().trim();
-      this.lastRawData = str;
-
       try {
         const json = JSON.parse(str);
-        if (json.led) {
-          this.parseAndSetLedFromString(String(json.led));
-        }
+        if (json.led) this.parseAndSetLedFromString(String(json.led));
         if (json.events) {
-          json.events.forEach((event) => {
+          json.events.forEach(event => {
             const keyNum = parseInt(event.label.split(' ')[1], 10) - 1;
             const state = parseInt(event.state, 10);
             this.queueOrHandleEvent(keyNum, state);
@@ -177,25 +121,20 @@ class IPortSMButtonsPlatform {
         if (str.includes('led=')) {
           const ledValue = str.split('led=')[1]?.trim();
           if (ledValue) this.parseAndSetLedFromString(ledValue);
-        } else {
-          const possibleRGB = str.replace(/\r|\n/g, '').trim();
-          if (/^\d{9}$/.test(possibleRGB)) this.parseAndSetLedFromString(possibleRGB);
         }
       }
     });
 
-    this.socket.on('error', (err) => {
+    this.socket.on('error', err => {
       this.log(`Socket error: ${err.message}`);
       try { this.socket.destroy(); } catch (e) {}
       this.connected = false;
-      if (this.accessory && this.accessory.updateReachability) this.accessory.updateReachability(false);
       if (!this.isShuttingDown) setTimeout(() => this.connect(), this.reconnectDelay);
     });
 
     this.socket.on('close', () => {
       this.log('Connection closed');
       this.connected = false;
-      if (this.accessory && this.accessory.updateReachability) this.accessory.updateReachability(false);
       if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
       if (!this.isShuttingDown) setTimeout(() => this.connect(), this.reconnectDelay);
     });
@@ -213,24 +152,22 @@ class IPortSMButtonsPlatform {
       const newG = parseInt(padded.substr(3, 3), 10);
       const newB = parseInt(padded.substr(6, 3), 10);
       this.ledColor = { r: newR, g: newG, b: newB };
-      this.updateLightCharacteristics();
     } catch (err) {
       // ignore
     }
   }
 
+  // ---------------- Button events ----------------
   queueOrHandleEvent(buttonIndex, state) {
-    this.log(`Queue or handle event: button ${buttonIndex + 1}, state ${state}, services ${this.buttonServices.length}`);
+    this.log(`Queue or handle event: button ${buttonIndex + 1}, state ${state}`);
     if (this.buttonServices.length === 0) {
       this.eventQueue.push({ buttonIndex, state });
-      this.log(`Queued event for button ${buttonIndex + 1}, state ${state}`);
     } else {
       this.handleButtonEvent(buttonIndex, state);
     }
   }
 
   processQueuedEvents() {
-    this.log(`Processing ${this.eventQueue.length} queued events`);
     while (this.eventQueue.length > 0) {
       const event = this.eventQueue.shift();
       this.handleButtonEvent(event.buttonIndex, event.state);
@@ -238,15 +175,7 @@ class IPortSMButtonsPlatform {
   }
 
   handleButtonEvent(buttonIndex, state) {
-    if (!this.connected || this.isShuttingDown) {
-      this.log(`Cannot handle event for button ${buttonIndex + 1}: not connected or shutting down`);
-      return;
-    }
-    const service = this.buttonServices[buttonIndex];
-    if (!service) {
-      this.log(`No service found for button ${buttonIndex + 1}`);
-      return;
-    }
+    if (!this.connected || this.isShuttingDown) return;
     const bs = this.buttonStates[buttonIndex];
 
     if (state === 1) {
@@ -260,28 +189,20 @@ class IPortSMButtonsPlatform {
 
   triggerButtonEvent(buttonIndex, eventType) {
     if (this.isShuttingDown) return;
-    const service = this.buttonServices[buttonIndex];
-    if (service) {
-      try {
-        service.updateCharacteristic(this.api.hap.Characteristic.ProgrammableSwitchEvent, eventType);
-      } catch (e) {
-        // ignore
-      }
-    }
-    const humanType = eventType === 0 ? 'single' : eventType === 1 ? 'double' : 'long';
-    this.log(`Button ${buttonIndex + 1} triggered ${humanType} press`);
+    this.log(`Button ${buttonIndex + 1} triggered single press`);
     if (eventType === 0) {
       this.executeButtonAction(buttonIndex + 1);
     }
   }
 
+  // ---------------- Action execution ----------------
   executeButtonAction(buttonNumber) {
     if (buttonNumber === 10) {
       this.cycleLEDColor();
       return;
     }
 
-    const actions = this.buttonMappings.filter(action => action.buttonNumber === buttonNumber);
+    const actions = this.buttonMappings.filter(a => a.buttonNumber === buttonNumber);
     if (actions.length === 0) {
       this.log(`No actions configured for button ${buttonNumber}`);
       return;
@@ -290,68 +211,52 @@ class IPortSMButtonsPlatform {
     const currentMode = this.getCurrentMode();
     this.log(`Current LED mode: ${currentMode}`);
 
-    let actionToExecute = actions.find(a => a.modeColor === currentMode);
-
-    if (!actionToExecute) {
-      actionToExecute = actions.find(a => a.modeColor === 'any');
-      if (!actionToExecute) {
-        this.log(`No action found for button ${buttonNumber} in ${currentMode} mode`);
-        return;
+    for (const action of actions) {
+      if (action.modeColor !== 'any' && action.modeColor !== currentMode) {
+        this.log(`Skipping action for button ${buttonNumber}, requires ${action.modeColor}`);
+        continue;
       }
-    }
 
-    this.log(`Executing action for button ${buttonNumber}: ${JSON.stringify(actionToExecute)}`);
-
-    if (actionToExecute.actionType === 'accessory') {
-      if (!actionToExecute.targetName || !Array.isArray(actionToExecute.targetName)) {
-        this.log('No valid targetName array specified for accessory action');
-        return;
-      }
-      actionToExecute.targetName.forEach(targetName => {
-        if (!targetName) {
-          this.log('Skipping empty targetName');
-          return;
-        }
-        this.executeHomeKitAction({ ...actionToExecute, targetName });
-      });
-    } else if (actionToExecute.actionType === 'led') {
-      this.executeLedAction(actionToExecute);
-    } else if (actionToExecute.actionType === 'scene') {
-      const mappingKey = this.getMappingKey(actionToExecute);
-      const vSwitch = this.mappingSwitches[mappingKey];
-      if (vSwitch) {
-        this.triggerVirtualSwitch(vSwitch, mappingKey, actionToExecute);
+      if (action.actionType === 'lifx') {
+        this.handleLifxAction(action);
       } else {
-        this.log(`No virtual switch found for scene mapping ${mappingKey}`);
+        this.log(`Unsupported actionType: ${action.actionType}`);
       }
     }
   }
 
-  triggerVirtualSwitch(service, mappingKey, mapping) {
-    try {
-      service.updateCharacteristic(this.api.hap.Characteristic.On, true);
-      this.log(`Triggered virtual switch for mapping ${mappingKey} -> ${mapping.targetName || ''} : ${mapping.action}`);
-      setTimeout(() => {
-        try {
-          service.updateCharacteristic(this.api.hap.Characteristic.On, false);
-        } catch (e) {
-          // ignore
-        }
-      }, this.triggerResetDelay);
-    } catch (e) {
-      this.log(`Error triggering virtual switch ${mappingKey}: ${e.message}`);
-    }
-  }
+  handleLifxAction(action) {
+    const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
 
-  getMappingKey(mapping) {
-    return `btn${mapping.buttonNumber}-${mapping.modeColor}-${mapping.action}-${(mapping.targetName || '').replace(/\s+/g, '_')}`;
+    ids.forEach(id => {
+      const bulb = this.lifx.light(id);
+      if (!bulb) {
+        this.log(`LIFX bulb ${id} not found`);
+        return;
+      }
+
+      switch (action.action) {
+        case 'on':
+          bulb.on(0, () => this.log(`Turned on LIFX ${id}`));
+          break;
+        case 'off':
+          bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
+          break;
+        case 'brightness':
+          bulb.color(0, 0, 65535, Math.round(action.value / 100 * 65535), 3500, 0);
+          this.log(`Set LIFX ${id} brightness to ${action.value}%`);
+          break;
+        default:
+          this.log(`Unknown LIFX action: ${action.action}`);
+      }
+    });
   }
 
   cycleLEDColor() {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
     const color = this.modeColors[colorName];
-    this.log(`Button 10 pressed: Cycling to ${colorName} color (${color.r},${color.g},${color.b})`);
+    this.log(`Button 10 pressed: Cycling to ${colorName}`);
     this.setLED(color.r, color.g, color.b);
   }
 
@@ -370,129 +275,7 @@ class IPortSMButtonsPlatform {
     return 'unknown';
   }
 
-  executeLedAction(action) {
-    if (action.ledColor) {
-      const colorName = action.ledColor.toLowerCase();
-      if (this.modeColors[colorName]) {
-        const color = this.modeColors[colorName];
-        this.setLED(color.r, color.g, color.b);
-        this.log(`Set LED to ${colorName}`);
-      } else {
-        this.log(`Unknown color name: ${action.ledColor}`);
-      }
-    }
-  }
-
-  executeHomeKitAction(action) {
-    if (!action.targetName) {
-      this.log('No accessory specified for action');
-      return;
-    }
-
-    const targetAccessory = this.findAccessoryByName(action.targetName);
-
-    if (!targetAccessory) {
-      this.log(`Accessory "${action.targetName}" not found in Homebridge`);
-      return;
-    }
-
-    let service = targetAccessory.getService(this.api.hap.Service.Switch) || targetAccessory.getService(this.api.hap.Service.Lightbulb);
-
-    if (!service) {
-      this.log(`No Switch or Lightbulb service found on accessory "${action.targetName}"`);
-      return;
-    }
-
-    if (action.action === 'brightness') {
-      const brightnessCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.Brightness);
-      if (!brightnessCharacteristic) {
-        this.log(`No Brightness characteristic found on accessory "${action.targetName}"`);
-        return;
-      }
-      const value = action.value;
-      if (typeof value !== 'number' || value < 0 || value > 100) {
-        this.log(`Invalid brightness value for "${action.targetName}": ${value}`);
-        return;
-      }
-      try {
-        brightnessCharacteristic.setValue(value);
-        this.log(`Set brightness of ${action.targetName} to ${value}%`);
-      } catch (e) {
-        this.log(`Error setting brightness of ${action.targetName}: ${e.message}`);
-      }
-      // Ensure the accessory is turned on when setting brightness
-      const onCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.On);
-      if (onCharacteristic && !onCharacteristic.value) {
-        try {
-          onCharacteristic.setValue(true);
-          this.log(`Turned on ${action.targetName} to apply brightness`);
-        } catch (e) {
-          this.log(`Error turning on ${action.targetName}: ${e.message}`);
-        }
-      }
-    } else {
-      const onCharacteristic = service.getCharacteristic(this.api.hap.Characteristic.On);
-      if (!onCharacteristic) {
-        this.log(`No On characteristic found on accessory "${action.targetName}"`);
-        return;
-      }
-      switch (action.action) {
-        case 'toggle': {
-          const currentState = onCharacteristic.value;
-          try {
-            onCharacteristic.setValue(!currentState);
-            this.log(`Toggled ${action.targetName} to ${!currentState ? 'on' : 'off'}`);
-          } catch (e) {
-            this.log(`Error toggling ${action.targetName}: ${e.message}`);
-          }
-          break;
-        }
-        case 'on':
-          try {
-            onCharacteristic.setValue(true);
-            this.log(`Turned on ${action.targetName}`);
-          } catch (e) {
-            this.log(`Error turning on ${action.targetName}: ${e.message}`);
-          }
-          break;
-        case 'off':
-          try {
-            onCharacteristic.setValue(false);
-            this.log(`Turned off ${action.targetName}`);
-          } catch (e) {
-            this.log(`Error turning off ${action.targetName}: ${e.message}`);
-          }
-          break;
-        default:
-          this.log(`Unknown action: ${action.action}`);
-      }
-    }
-  }
-
-  findAccessoryByName(name) {
-    try {
-      const hbServer = this.api._homebridge || this.api.server;
-      if (!hbServer || !hbServer.accessories || !hbServer.accessories.accessories) {
-        this.log('No accessories map available');
-        return null;
-      }
-      const accessoriesMap = hbServer.accessories.accessories;
-      const accessoryNames = Array.from(accessoriesMap.values()).map(acc => `${acc.displayName} (${acc.UUID})`).join(', ');
-      this.log(`Available accessories: ${accessoryNames}`);
-      for (const acc of accessoriesMap.values()) {
-        if (acc.displayName === name || acc.UUID === name) {
-          this.log(`Found accessory: ${name} (${acc.displayName}, ${acc.UUID})`);
-          return acc;
-        }
-      }
-      this.log(`Accessory "${name}" not found`);
-      return null;
-    } catch (e) {
-      this.log(`Error in findAccessoryByName: ${e.message}`);
-      return null;
-    }
-  }
-
+  // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
@@ -513,164 +296,26 @@ class IPortSMButtonsPlatform {
     }
   }
 
-  updateLightCharacteristics() {
-    if (!this.lightService || !this.connected || this.isShuttingDown) return;
-    const hsv = this.rgbToHsv(this.ledColor.r, this.ledColor.g, this.ledColor.b);
-    try {
-      this.lightService
-        .updateCharacteristic(this.api.hap.Characteristic.On, hsv.v > 0)
-        .updateCharacteristic(this.api.hap.Characteristic.Hue, hsv.h)
-        .updateCharacteristic(this.api.hap.Characteristic.Saturation, hsv.s)
-        .updateCharacteristic(this.api.hap.Characteristic.Brightness, hsv.v);
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  rgbToHsv(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b), v = max, d = max - min;
-    const s = max === 0 ? 0 : d / max;
-    let h;
-    if (max === min) h = 0;
-    else {
-      switch (max) {
-        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-        case g: h = (b - r) / d + 2; break;
-        case b: h = (r - g) / d + 4; break;
-      }
-      h /= 6;
-    }
-    return { h: h * 360, s: s * 100, v: v * 100 };
-  }
-
-  hsvToRgb(h, s, v) {
-    h /= 360; s /= 100; v /= 100;
-    const i = Math.floor(h * 6), f = h * 6 - i;
-    const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
-    let r, g, b;
-    switch (i % 6) {
-      case 0: r = v; g = t; b = p; break;
-      case 1: r = q; g = v; b = p; break;
-      case 2: r = p; g = v; b = t; break;
-      case 3: r = p; g = q; b = v; break;
-      case 4: r = t; g = p; b = v; break;
-      case 5: r = v; g = p; b = q; break;
-    }
-    return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
-  }
-
+  // ---------------- Homebridge Accessory exposure ----------------
   accessories(callback) {
-    this.log('Starting accessories setup');
+    this.log('Setting up dummy accessories (for buttons only)');
     try {
       const PlatformAccessory = this.api.platformAccessory;
-      if (!PlatformAccessory) {
-        throw new Error('PlatformAccessory is not available from API');
-      }
-
-      if (!this.api.hap.Service || !this.api.hap.Characteristic || !this.api.hap.uuid) {
-        throw new Error(`Required HAP classes are undefined`);
-      }
-
       const uuidStr = this.api.hap.uuid.generate(this.config.name || 'iPort SM Buttons LAN');
       this.accessory = new PlatformAccessory(this.config.name || 'iPort SM Buttons LAN', uuidStr);
 
-      if (this.api.hap.Service.ServiceLabel) {
-        this.accessory.addService(this.api.hap.Service.ServiceLabel)
-          .setCharacteristic(this.api.hap.Characteristic.ServiceLabelNamespace, 1);
-      }
-
       this.buttonServices = [];
       for (let i = 1; i <= 10; i++) {
-        const buttonService = this.accessory.addService(this.api.hap.Service.StatelessProgrammableSwitch, `Button ${i}`, `button${i}`);
+        const buttonService = this.accessory.addService(
+          this.api.hap.Service.StatelessProgrammableSwitch,
+          `Button ${i}`, `button${i}`
+        );
         if (this.api.hap.Characteristic.ServiceLabelIndex) {
           buttonService.setCharacteristic(this.api.hap.Characteristic.ServiceLabelIndex, i);
         }
         this.buttonServices[i - 1] = buttonService;
-        this.log(`Added button service for Button ${i}`);
       }
 
-      this.lightService = this.accessory.addService(this.api.hap.Service.Lightbulb, 'LED');
-      this.lightService.setCharacteristic(this.api.hap.Characteristic.On, true);
-      this.log('Added LED light service');
-
-      this.lightService.getCharacteristic(this.api.hap.Characteristic.On)
-        .onGet(() => {
-          if (!this.connected) throw new Error('Device not connected');
-          return this.rgbToHsv(this.ledColor.r, this.ledColor.g, this.ledColor.b).v > 0;
-        })
-        .onSet((value) => {
-          if (!this.connected) throw new Error('Device not connected');
-          if (value && this.ledColor.r === 0 && this.ledColor.g === 0 && this.ledColor.b === 0) {
-            this.setLED(255, 255, 255);
-          } else if (!value) {
-            this.setLED(0, 0, 0);
-          }
-        });
-
-      this.lightService.getCharacteristic(this.api.hap.Characteristic.Brightness)
-        .onGet(() => {
-          if (!this.connected) throw new Error('Device not connected');
-          return this.rgbToHsv(this.ledColor.r, this.ledColor.g, this.ledColor.b).v;
-        })
-        .onSet((value) => {
-          if (!this.connected) throw new Error('Device not connected');
-          const h = this.lightService.getCharacteristic(this.api.hap.Characteristic.Hue).value;
-          const s = this.lightService.getCharacteristic(this.api.hap.Characteristic.Saturation).value;
-          const { r, g, b } = this.hsvToRgb(h, s, value);
-          this.setLED(r, g, b);
-        });
-
-      this.lightService.getCharacteristic(this.api.hap.Characteristic.Hue)
-        .onGet(() => {
-          if (!this.connected) throw new Error('Device not connected');
-          return this.rgbToHsv(this.ledColor.r, this.ledColor.g, this.ledColor.b).h;
-        })
-        .onSet((value) => {
-          if (!this.connected) throw new Error('Device not connected');
-          const s = this.lightService.getCharacteristic(this.api.hap.Characteristic.Saturation).value;
-          const v = this.lightService.getCharacteristic(this.api.hap.Characteristic.Brightness).value;
-          const { r, g, b } = this.hsvToRgb(value, s, v);
-          this.setLED(r, g, b);
-        });
-
-      this.lightService.getCharacteristic(this.api.hap.Characteristic.Saturation)
-        .onGet(() => {
-          if (!this.connected) throw new Error('Device not connected');
-          return this.rgbToHsv(this.ledColor.r, this.ledColor.g, this.ledColor.b).s;
-        })
-        .onSet((value) => {
-          if (!this.connected) throw new Error('Device not connected');
-          const h = this.lightService.getCharacteristic(this.api.hap.Characteristic.Hue).value;
-          const v = this.lightService.getCharacteristic(this.api.hap.Characteristic.Brightness).value;
-          const { r, g, b } = this.hsvToRgb(h, value, v);
-          this.setLED(r, g, b);
-        });
-
-      // Virtual mapping switches ONLY for scene mappings
-      this.mappingSwitches = {};
-      this.buttonMappings
-        .filter(mapping => mapping.actionType === 'scene')
-        .forEach((mapping) => {
-          const key = this.getMappingKey(mapping);
-          const svcName = `B${mapping.buttonNumber} [${mapping.modeColor}] → ${mapping.action} ${mapping.targetName || ''}`;
-          const vSwitch = this.accessory.addService(this.api.hap.Service.Switch, svcName, key);
-
-          vSwitch.getCharacteristic(this.api.hap.Characteristic.On).onSet((value) => {
-            if (value) {
-              setTimeout(() => {
-                try { vSwitch.updateCharacteristic(this.api.hap.Characteristic.On, false); } catch (e) {}
-              }, this.triggerResetDelay);
-            }
-          });
-
-          this.mappingSwitches[key] = vSwitch;
-          this.log(`Added virtual switch for scene mapping: ${svcName}`);
-        });
-
-      if (this.accessory.updateReachability) this.accessory.updateReachability(this.connected);
-      this.log('Accessories setup completed');
-      this.processQueuedEvents();
       callback([this.accessory]);
     } catch (e) {
       this.log(`Error in accessories setup: ${e.message}`);
@@ -679,35 +324,24 @@ class IPortSMButtonsPlatform {
   }
 
   configureAccessory(accessory) {
-    this.log('Configuring cached accessory');
-    try {
-      this.accessory = accessory;
-      if (this.accessory.updateReachability) this.accessory.updateReachability(this.connected);
+    this.accessory = accessory;
+  }
 
-      this.buttonServices = [];
-      this.mappingSwitches = {};
+  // ---------------- HTTP Debug Server ----------------
+  startDirectControlServer() {
+    this.app.post('/action/button/:buttonNumber', (req, res) => {
+      const buttonNumber = parseInt(req.params.buttonNumber, 10);
+      this.executeButtonAction(buttonNumber);
+      res.status(200).json({ success: true });
+    });
 
-      accessory.services.forEach(service => {
-        if (service.subtype?.startsWith('button')) {
-          const index = parseInt(service.subtype.replace('button', '')) - 1;
-          this.buttonServices[index] = service;
-        } else if (service.displayName === 'LED' && service.UUID === this.api.hap.Service.Lightbulb.UUID) {
-          this.lightService = service;
-        } else if (service.UUID === this.api.hap.Service.Switch.UUID && service.subtype) {
-          this.mappingSwitches[service.subtype] = service;
-          try { service.updateCharacteristic(this.api.hap.Characteristic.On, false); } catch (e) {}
-        }
-      });
-
-      this.log(`Restored ${this.buttonServices.length} button services and ${Object.keys(this.mappingSwitches).length} mapping switches`);
-      this.processQueuedEvents();
-    } catch (e) {
-      this.log(`Error in configureAccessory: ${e.message}`);
-    }
+    this.server = this.app.listen(this.directControlPort, '127.0.0.1', () => {
+      this.log(`Direct control HTTP server running on http://127.0.0.1:${this.directControlPort}`);
+    });
   }
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
