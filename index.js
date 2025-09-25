@@ -323,11 +323,7 @@ class IPortSMButtonsPlatform {
       service.updateCharacteristic(this.api.hap.Characteristic.On, true);
       this.log(`Triggered virtual switch for mapping ${mappingKey} -> ${mapping.targetName || ''} : ${mapping.action}`);
       setTimeout(() => {
-        try {
-          service.updateCharacteristic(this.api.hap.Characteristic.On, false);
-        } catch (e) {
-          // ignore
-        }
+        try { service.updateCharacteristic(this.api.hap.Characteristic.On, false); } catch (e) {}
       }, this.triggerResetDelay);
     } catch (e) {
       this.log(`Error triggering virtual switch ${mappingKey}: ${e.message}`);
@@ -464,14 +460,22 @@ class IPortSMButtonsPlatform {
     try {
       const hbServer = this.api._homebridge || this.api.server;
       if (!hbServer || !hbServer.accessories || !hbServer.accessories.accessories) {
+        this.log('No accessories map available');
         return null;
       }
       const accessoriesMap = hbServer.accessories.accessories;
+      const accessoryNames = Array.from(accessoriesMap.values()).map(acc => `${acc.displayName} (${acc.UUID})`).join(', ');
+      this.log(`Available accessories: ${accessoryNames}`);
       for (const acc of accessoriesMap.values()) {
-        if (acc.displayName === name) return acc;
+        if (acc.displayName === name || acc.UUID === name) {
+          this.log(`Found accessory: ${name} (${acc.displayName})`);
+          return acc;
+        }
       }
+      this.log(`Accessory "${name}" not found`);
       return null;
     } catch (e) {
+      this.log(`Error in findAccessoryByName: ${e.message}`);
       return null;
     }
   }
