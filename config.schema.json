@@ -76,14 +76,15 @@
               "description": "Type of action: 'accessory' (control devices), 'scene' (HomeKit scene), or 'led' (change LED color)."
             },
             "targetName": {
-              "title": "Target Accessory or Scene Name(s)",
+              "title": "Target Accessory or Scene Name(s)/UUID(s)",
               "type": "array",
               "items": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Name of a Homebridge accessory or scene (e.g., 'LIFX White')."
+                "placeholder": "LIFX White or 47bf31ad-324e-4558-89e8-dbbf4e0f1554",
+                "description": "Name or UUID of a Homebridge accessory or scene (e.g., 'LIFX White' or '47bf31ad-324e-4558-89e8-dbbf4e0f1554')."
               },
-              "description": "Names of target accessories (for 'accessory') or scene (for 'scene'). Add multiple names to control multiple devices (e.g., ['LIFX White', 'LIFX Color']). Must match Homebridge accessory names exactly."
+              "description": "Names or UUIDs of target accessories (for 'accessory') or scenes (for 'scene'). Add multiple entries to control multiple devices (e.g., ['LIFX White', '47bf31ad-324e-4558-89e8-dbbf4e0f1554']). Names must match Homebridge accessory names exactly; UUIDs can be found in cachedAccessories."
             },
             "action": {
               "title": "Action",
