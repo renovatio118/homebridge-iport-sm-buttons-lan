@@ -8,49 +8,36 @@
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "iPort Buttons LAN",
-        "description": "Name of the iPort device in HomeKit (e.g., 'iPort Buttons LAN')."
+        "default": "iPort Buttons LAN"
       },
       "ip": {
         "title": "Device IP Address",
         "type": "string",
-        "placeholder": "192.168.2.12",
-        "description": "IP address of the iPort device (e.g., '192.168.2.12')."
+        "placeholder": "192.168.2.12"
       },
       "port": {
         "title": "Port",
         "type": "integer",
-        "default": 10001,
-        "description": "TCP port of the iPort device (default: 10001)."
+        "default": 10001
       },
       "timeout": {
         "title": "Connection Timeout (ms)",
         "type": "integer",
-        "default": 5000,
-        "description": "Timeout for TCP connection attempts (ms)."
+        "default": 5000
       },
       "reconnectDelay": {
         "title": "Reconnect Delay (ms)",
         "type": "integer",
-        "default": 5000,
-        "description": "Delay before reconnecting after disconnection (ms)."
-      },
-      "triggerResetDelay": {
-        "title": "Trigger Reset Delay (ms)",
-        "type": "integer",
-        "default": 500,
-        "description": "Delay before resetting virtual switches for scene actions (ms)."
+        "default": 5000
       },
       "directControlPort": {
         "title": "Direct Control HTTP Port",
         "type": "integer",
-        "default": 3000,
-        "description": "Port for HTTP control (e.g., curl http://localhost:3000/action/button/1)."
+        "default": 3000
       },
       "buttonMappings": {
         "title": "Button Mappings",
         "type": "array",
-        "description": "Configure actions for each button press. Use 'accessory' for direct device control (fastest), 'scene' for HomeKit scenes, or 'led' to change LED color.",
         "items": {
           "type": "object",
           "properties": {
@@ -58,80 +45,48 @@
               "title": "Button Number",
               "type": "integer",
               "minimum": 1,
-              "maximum": 10,
-              "description": "Button number to map (1–10)."
+              "maximum": 10
             },
             "modeColor": {
               "title": "LED Mode Color",
               "type": "string",
               "enum": ["yellow", "red", "green", "blue", "purple", "white", "any"],
               "default": "any",
-              "description": "LED color mode to trigger this action. Use 'any' to trigger regardless of color."
+              "description": "Execute only when iPort LED is this color (or 'any' for all)."
             },
             "actionType": {
               "title": "Action Type",
               "type": "string",
-              "enum": ["accessory", "scene", "led"],
-              "default": "accessory",
-              "description": "Type of action: 'accessory' (control devices), 'scene' (HomeKit scene), or 'led' (change LED color)."
+              "enum": ["lifx"],
+              "default": "lifx"
             },
-            "targetName": {
-              "title": "Target Accessory or Scene Name(s)/UUID(s)",
-              "type": "array",
+            "targetId": {
+              "title": "Target LIFX Bulb(s)",
+              "type": ["string", "array"],
               "items": {
                 "type": "string",
-                "minLength": 1,
-                "placeholder": "LIFX White or 47bf31ad-324e-4558-89e8-dbbf4e0f1554",
-                "description": "Name or UUID of a Homebridge accessory or scene (e.g., 'LIFX White' or '47bf31ad-324e-4558-89e8-dbbf4e0f1554')."
+                "description": "LIFX bulb ID (MAC without ':', e.g. d073d5000001)"
               },
-              "description": "Names or UUIDs of target accessories (for 'accessory') or scenes (for 'scene'). Add multiple entries to control multiple devices (e.g., ['LIFX White', '47bf31ad-324e-4558-89e8-dbbf4e0f1554']). Names must match Homebridge accessory names exactly; UUIDs can be found in cachedAccessories."
+              "description": "Single LIFX ID or list of IDs (bulbs controlled together)."
             },
             "action": {
               "title": "Action",
               "type": "string",
-              "enum": ["on", "off", "toggle", "brightness"],
-              "default": "toggle",
-              "description": "Action to perform: 'on', 'off', 'toggle' (power state), or 'brightness' (set brightness)."
-            },
-            "ledColor": {
-              "title": "LED Color",
-              "type": "string",
-              "enum": ["yellow", "red", "green", "blue", "purple", "white"],
-              "description": "Target LED color for 'led' actionType (e.g., 'red')."
+              "enum": ["on", "off", "brightness"],
+              "default": "on"
             },
             "value": {
               "title": "Brightness Value (0–100)",
               "type": "integer",
               "minimum": 0,
-              "maximum": 100,
-              "description": "Brightness percentage for 'brightness' action (0–100)."
+              "maximum": 100
             }
           },
-          "required": ["buttonNumber", "modeColor", "actionType", "action"],
+          "required": ["buttonNumber", "modeColor", "actionType", "targetId", "action"],
           "allOf": [
             {
-              "if": {
-                "properties": { "actionType": { "enum": ["accessory", "scene"] } }
-              },
-              "then": {
-                "required": ["targetName"]
-              }
-            },
-            {
-              "if": {
-                "properties": { "actionType": { "const": "led" } }
-              },
-              "then": {
-                "required": ["ledColor"]
-              }
-            },
-            {
-              "if": {
-                "properties": { "action": { "const": "brightness" } }
-              },
-              "then": {
-                "required": ["value"]
-              }
+              "if": { "properties": { "action": { "const": "brightness" } } },
+              "then": { "required": ["value"] }
             }
           ]
         }
