@@ -1,0 +1,86 @@
+{
+  "pluginAlias": "IPortSMButtonsLAN",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "iPort Buttons LAN"
+      },
+      "ip": {
+        "title": "Device IP Address",
+        "type": "string",
+        "placeholder": "192.168.2.12"
+      },
+      "port": {
+        "title": "Port",
+        "type": "integer",
+        "default": 10001
+      },
+      "timeout": {
+        "title": "Connection Timeout (ms)",
+        "type": "integer",
+        "default": 5000
+      },
+      "reconnectDelay": {
+        "title": "Reconnect Delay (ms)",
+        "type": "integer",
+        "default": 5000
+      },
+      "triggerResetDelay": {
+        "title": "Trigger Reset Delay (ms)",
+        "type": "integer",
+        "default": 500
+      },
+      "directControlPort": {
+        "title": "Direct Control HTTP Port",
+        "type": "integer",
+        "default": 3000,
+        "description": "Port for direct HTTP control of button actions (bypasses HomeKit for faster response)"
+      },
+      "buttonMappings": {
+        "title": "Button Mappings",
+        "type": "array",
+        "description": "Each mapping triggers an action when the specified button is pressed and the LED color matches the modeColor. For 'accessory' and 'led' types, actions are executed directly within Homebridge for fastest LAN response. For 'scene', a virtual switch is created in HomeKit; use it in automations to trigger scenes (may have some HomeKit latency).",
+        "items": {
+          "type": "object",
+          "properties": {
+            "buttonNumber": {
+              "title": "Button Number (1–10)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "modeColor": {
+              "title": "LED Mode Color",
+              "type": "string",
+              "enum": ["yellow", "red", "green", "blue", "purple", "white", "any"],
+              "default": "any"
+            },
+            "actionType": {
+              "title": "Action Type",
+              "type": "string",
+              "enum": ["accessory", "scene", "led"],
+              "default": "accessory"
+            },
+            "targetName": {
+              "title": "Target Accessory / Scene Name",
+              "type": "string"
+            },
+            "action": {
+              "title": "Action",
+              "type": "string",
+              "enum": ["on", "off", "toggle"],
+              "default": "toggle"
+            }
+          },
+          "required": ["buttonNumber", "modeColor", "actionType", "action"]
+        }
+      }
+    },
+    "required": ["ip", "buttonMappings"]
+  }
+}
