@@ -28,6 +28,7 @@ class IPortSMButtonsPlatform {
     this.keepAliveInterval = null;
     this.eventQueue = [];
     this.lastRawData = null;
+    this.allAccessories = []; // Cache for all accessories
 
     // HTTP server for direct control
     this.app = express();
@@ -70,6 +71,14 @@ class IPortSMButtonsPlatform {
         this.log('Registering accessories after didFinishLaunching');
         this.api.registerPlatformAccessories('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', accessories);
       });
+      // Cache all accessories after launching
+      const hbServer = this.api._homebridge || this.api.server;
+      if (hbServer && hbServer.accessories && hbServer.accessories.accessories) {
+        this.allAccessories = Array.from(hbServer.accessories.accessories.values());
+        this.log(`Cached ${this.allAccessories.length} accessories`);
+      } else {
+        this.log('Failed to cache accessories - map not available');
+      }
       this.processQueuedEvents();
     });
 
@@ -323,7 +332,11 @@ class IPortSMButtonsPlatform {
       service.updateCharacteristic(this.api.hap.Characteristic.On, true);
       this.log(`Triggered virtual switch for mapping ${mappingKey} -> ${mapping.targetName || ''} : ${mapping.action}`);
       setTimeout(() => {
-        try { service.updateCharacteristic(this.api.hap.Characteristic.On, false); } catch (e) {}
+        try {
+          service.updateCharacteristic(this.api.hap.Characteristic.On, false);
+        } catch (e) {
+          // ignore
+        }
       }, this.triggerResetDelay);
     } catch (e) {
       this.log(`Error triggering virtual switch ${mappingKey}: ${e.message}`);
@@ -468,7 +481,7 @@ class IPortSMButtonsPlatform {
       this.log(`Available accessories: ${accessoryNames}`);
       for (const acc of accessoriesMap.values()) {
         if (acc.displayName === name || acc.UUID === name) {
-          this.log(`Found accessory: ${name} (${acc.displayName})`);
+          this.log(`Found accessory: ${name} (${acc.displayName}, ${acc.UUID})`);
           return acc;
         }
       }
