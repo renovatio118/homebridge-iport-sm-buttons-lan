@@ -44,12 +44,12 @@
       "buttonMappings": {
         "title": "Button Mappings",
         "type": "array",
-        "description": "Each mapping triggers an action when the specified button is pressed and the LED color matches the modeColor. For 'accessory' and 'led' types, actions are executed directly within Homebridge for fastest LAN response. For 'scene', a virtual switch is created in HomeKit; use it in automations to trigger scenes (may have some HomeKit latency).",
+        "description": "Each mapping triggers an action when the specified button is pressed and the LED color matches the modeColor. For 'accessory' type, multiple targetNames can be specified to control multiple accessories. For 'brightness' action, a value (0–100) sets the brightness. Actions are executed directly within Homebridge for fastest LAN response, except for 'scene' which uses a virtual switch.",
         "items": {
           "type": "object",
           "properties": {
             "buttonNumber": {
-              "title": "Button Number (1�10)",
+              "title": "Button Number (1–10)",
               "type": "integer",
               "minimum": 1,
               "maximum": 10
@@ -67,17 +67,38 @@
               "default": "accessory"
             },
             "targetName": {
-              "title": "Target Accessory / Scene Name",
-              "type": "string"
+              "title": "Target Accessory or Scene Name(s)",
+              "type": ["string", "array"],
+              "items": {
+                "type": "string"
+              },
+              "description": "Name(s) of the target accessory or scene. Use a single string or an array of strings for multiple accessories."
             },
             "action": {
               "title": "Action",
               "type": "string",
-              "enum": ["on", "off", "toggle"],
+              "enum": ["on", "off", "toggle", "brightness"],
               "default": "toggle"
+            },
+            "value": {
+              "title": "Brightness Value (0–100)",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Required for action: 'brightness'. Sets the brightness percentage."
             }
           },
-          "required": ["buttonNumber", "modeColor", "actionType", "action"]
+          "required": ["buttonNumber", "modeColor", "actionType", "action"],
+          "allOf": [
+            {
+              "if": {
+                "properties": { "action": { "const": "brightness" } }
+              },
+              "then": {
+                "required": ["value"]
+              }
+            }
+          ]
         }
       }
     },
