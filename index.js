@@ -152,9 +152,7 @@ class IPortSMButtonsPlatform {
       const newG = parseInt(padded.substr(3, 3), 10);
       const newB = parseInt(padded.substr(6, 3), 10);
       this.ledColor = { r: newR, g: newG, b: newB };
-    } catch (err) {
-      // ignore
-    }
+    } catch (err) {}
   }
 
   // ---------------- Button events ----------------
@@ -257,7 +255,7 @@ class IPortSMButtonsPlatform {
             const saturation = typeof state.saturation === 'number' ? state.saturation : 0;
             const kelvin = typeof state.kelvin === 'number' ? state.kelvin : 3500;
             const brightness = Math.max(0, Math.min(1, action.value / 100));
-            bulb.color(hue, saturation, brightness, kelvin, 350, 0);
+            bulb.color(hue, saturation, brightness, kelvin, 350, () => {});
             this.log(`Set LIFX ${id} brightness to ${action.value}%`);
           });
           break;
@@ -267,7 +265,7 @@ class IPortSMButtonsPlatform {
     });
   }
 
-  // ---------------- LED methods ----------------
+  // ---------------- LED ----------------
   cycleLEDColor() {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
@@ -293,18 +291,16 @@ class IPortSMButtonsPlatform {
 
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
-    const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
+    const cmd = `\rled=${r.toString().padStart(3,'0')}${g.toString().padStart(3,'0')}${b.toString().padStart(3,'0')}\r`;
     try {
       this.socket.write(cmd);
       this.ledColor = { r, g, b };
-    } catch (e) {}
+    } catch(e) {}
   }
 
   queryLED() {
     if (!this.connected || this.isShuttingDown) return;
-    try {
-      this.socket.write('\rled=?\r');
-    } catch (e) {}
+    try { this.socket.write('\rled=?\r'); } catch(e) {}
   }
 
   // ---------------- Homebridge ----------------
@@ -328,7 +324,7 @@ class IPortSMButtonsPlatform {
       }
 
       callback([this.accessory]);
-    } catch (e) {
+    } catch(e) {
       this.log(`Error in accessories setup: ${e.message}`);
       callback([]);
     }
