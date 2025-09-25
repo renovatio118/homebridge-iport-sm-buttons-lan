@@ -27,7 +27,7 @@ class IPortSMButtonsPlatform {
     this.keepAliveInterval = null;
     this.eventQueue = [];
 
-    // New: LIFX client
+    // LIFX client
     this.lifx = new LifxClient();
     this.lifx.init();
     this.lifx.on('light-new', light => {
@@ -37,12 +37,12 @@ class IPortSMButtonsPlatform {
       this.log(`LIFX error: ${err.message}`);
     });
 
-    // HTTP server for debug/manual control
+    // HTTP server
     this.app = express();
     this.app.use(express.json());
     this.server = null;
 
-    // mode colors for iPort LED
+    // mode colors
     this.modeColors = {
       yellow: { r: 255, g: 255, b: 0 },
       red: { r: 255, g: 0, b: 0 },
@@ -229,11 +229,12 @@ class IPortSMButtonsPlatform {
     const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
 
     ids.forEach(id => {
-      const bulb = this.lifx.light(id);
-      if (!bulb) {
+      const lights = this.lifx.lights({ id });
+      if (!lights || lights.length === 0) {
         this.log(`LIFX bulb ${id} not found`);
         return;
       }
+      const bulb = lights[0];
 
       switch (action.action) {
         case 'on':
@@ -243,8 +244,20 @@ class IPortSMButtonsPlatform {
           bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
           break;
         case 'brightness':
-          bulb.color(0, 0, 65535, Math.round(action.value / 100 * 65535), 3500, 0);
-          this.log(`Set LIFX ${id} brightness to ${action.value}%`);
+          if (typeof action.value !== 'number') {
+            this.log(`Brightness action missing value for bulb ${id}`);
+            break;
+          }
+          // Keep hue/saturation/kelvin unchanged, only set brightness (0-1)
+          bulb.getState((err, state) => {
+            if (err) {
+              this.log(`Error getting state for ${id}: ${err.message}`);
+              return;
+            }
+            const brightness = Math.max(0, Math.min(1, action.value / 100));
+            bulb.color(state.hue, state.saturation, brightness, state.kelvin, 350, 0);
+            this.log(`Set LIFX ${id} brightness to ${action.value}%`);
+          });
           break;
         default:
           this.log(`Unknown LIFX action: ${action.action}`);
@@ -275,7 +288,6 @@ class IPortSMButtonsPlatform {
     return 'unknown';
   }
 
-  // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
@@ -327,7 +339,6 @@ class IPortSMButtonsPlatform {
     this.accessory = accessory;
   }
 
-  // ---------------- HTTP Debug Server ----------------
   startDirectControlServer() {
     this.app.post('/action/button/:buttonNumber', (req, res) => {
       const buttonNumber = parseInt(req.params.buttonNumber, 10);
