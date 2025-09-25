@@ -62,12 +62,12 @@
             },
             "targetId": {
               "title": "Target LIFX Bulb(s)",
-              "type": ["string", "array"],
+              "type": "array",
               "items": {
                 "type": "string",
                 "description": "LIFX bulb ID (MAC without ':', e.g. d073d5000001)"
               },
-              "description": "Single LIFX ID or list of IDs (bulbs controlled together)."
+              "description": "List of LIFX IDs (bulbs controlled together)."
             },
             "action": {
               "title": "Action",
@@ -79,7 +79,8 @@
               "title": "Brightness Value (0–100)",
               "type": "integer",
               "minimum": 0,
-              "maximum": 100
+              "maximum": 100,
+              "description": "Required if action is 'brightness'"
             }
           },
           "required": ["buttonNumber", "modeColor", "actionType", "targetId", "action"],
