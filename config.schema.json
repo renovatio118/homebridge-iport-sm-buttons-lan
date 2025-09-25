@@ -8,136 +8,112 @@
       "name": {
         "title": "Name",
         "type": "string",
-        "required": true,
         "default": "iPort Buttons LAN",
-        "description": "Name of the iPort device in HomeKit."
+        "description": "Name of the iPort device in HomeKit (e.g., 'iPort Buttons LAN')."
       },
       "ip": {
         "title": "Device IP Address",
         "type": "string",
-        "required": true,
         "placeholder": "192.168.2.12",
-        "description": "IP address of the iPort device."
+        "description": "IP address of the iPort device (e.g., '192.168.2.12')."
       },
       "port": {
         "title": "Port",
         "type": "integer",
-        "required": true,
         "default": 10001,
-        "description": "TCP port of the iPort device."
+        "description": "TCP port of the iPort device (default: 10001)."
       },
       "timeout": {
         "title": "Connection Timeout (ms)",
         "type": "integer",
         "default": 5000,
-        "description": "Timeout for TCP connection attempts."
+        "description": "Timeout for TCP connection attempts (ms)."
       },
       "reconnectDelay": {
         "title": "Reconnect Delay (ms)",
         "type": "integer",
         "default": 5000,
-        "description": "Delay before attempting to reconnect after a disconnection."
+        "description": "Delay before reconnecting after disconnection (ms)."
       },
       "triggerResetDelay": {
         "title": "Trigger Reset Delay (ms)",
         "type": "integer",
         "default": 500,
-        "description": "Delay before resetting virtual switches for scene actions."
+        "description": "Delay before resetting virtual switches for scene actions (ms)."
       },
       "directControlPort": {
         "title": "Direct Control HTTP Port",
         "type": "integer",
         "default": 3000,
-        "description": "Port for HTTP control of button actions (e.g., curl http://localhost:3000/action/button/1)."
+        "description": "Port for HTTP control (e.g., curl http://localhost:3000/action/button/1)."
       },
       "buttonMappings": {
         "title": "Button Mappings",
         "type": "array",
-        "description": "Define actions for each button press based on the LED mode color. Use 'accessory' to control devices directly (fastest, LAN-speed), 'scene' for HomeKit scenes, or 'led' to change LED color.",
+        "description": "Configure actions for each button press. Use 'accessory' for direct device control (fastest), 'scene' for HomeKit scenes, or 'led' to change LED color.",
         "items": {
           "type": "object",
           "properties": {
             "buttonNumber": {
               "title": "Button Number",
               "type": "integer",
-              "required": true,
               "minimum": 1,
               "maximum": 10,
-              "description": "The button number (1–10) to map."
+              "description": "Button number to map (1–10)."
             },
             "modeColor": {
               "title": "LED Mode Color",
               "type": "string",
-              "required": true,
               "enum": ["yellow", "red", "green", "blue", "purple", "white", "any"],
               "default": "any",
-              "description": "The LED color mode that triggers this action. Use 'any' to trigger regardless of color."
+              "description": "LED color mode to trigger this action. Use 'any' to trigger regardless of color."
             },
             "actionType": {
               "title": "Action Type",
               "type": "string",
-              "required": true,
               "enum": ["accessory", "scene", "led"],
               "default": "accessory",
-              "description": "Type of action: 'accessory' (control a device), 'scene' (trigger a HomeKit scene), or 'led' (change LED color)."
+              "description": "Type of action: 'accessory' (control devices), 'scene' (HomeKit scene), or 'led' (change LED color)."
             },
             "targetName": {
               "title": "Target Accessory or Scene Name(s)",
-              "type": ["string", "array"],
+              "type": "array",
               "items": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "description": "Name of a Homebridge accessory or scene (e.g., 'LIFX White')."
               },
-              "description": "Name(s) of the target accessory (for 'accessory') or scene (for 'scene'). Use a string for one target or an array for multiple (e.g., ['LIFX White', 'LIFX Color']). Must match Homebridge accessory names exactly."
+              "description": "Names of target accessories (for 'accessory') or scene (for 'scene'). Add multiple names to control multiple devices (e.g., ['LIFX White', 'LIFX Color']). Must match Homebridge accessory names exactly."
             },
             "action": {
               "title": "Action",
               "type": "string",
-              "required": true,
               "enum": ["on", "off", "toggle", "brightness"],
               "default": "toggle",
-              "description": "Action to perform: 'on', 'off', 'toggle' for power state, or 'brightness' to set brightness."
+              "description": "Action to perform: 'on', 'off', 'toggle' (power state), or 'brightness' (set brightness)."
             },
             "ledColor": {
               "title": "LED Color",
               "type": "string",
               "enum": ["yellow", "red", "green", "blue", "purple", "white"],
-              "description": "Target LED color for 'led' actionType."
+              "description": "Target LED color for 'led' actionType (e.g., 'red')."
             },
             "value": {
               "title": "Brightness Value (0–100)",
               "type": "integer",
               "minimum": 0,
               "maximum": 100,
-              "description": "Brightness percentage for 'brightness' action."
+              "description": "Brightness percentage for 'brightness' action (0–100)."
             }
           },
           "required": ["buttonNumber", "modeColor", "actionType", "action"],
           "allOf": [
             {
               "if": {
-                "properties": { "actionType": { "const": "accessory" } }
+                "properties": { "actionType": { "enum": ["accessory", "scene"] } }
               },
               "then": {
-                "required": ["targetName"],
-                "properties": {
-                  "targetName": {
-                    "required": true
-                  }
-                }
-              }
-            },
-            {
-              "if": {
-                "properties": { "actionType": { "const": "scene" } }
-              },
-              "then": {
-                "required": ["targetName"],
-                "properties": {
-                  "targetName": {
-                    "required": true
-                  }
-                }
+                "required": ["targetName"]
               }
             },
             {
@@ -145,12 +121,7 @@
                 "properties": { "actionType": { "const": "led" } }
               },
               "then": {
-                "required": ["ledColor"],
-                "properties": {
-                  "ledColor": {
-                    "required": true
-                  }
-                }
+                "required": ["ledColor"]
               }
             },
             {
@@ -158,24 +129,7 @@
                 "properties": { "action": { "const": "brightness" } }
               },
               "then": {
-                "required": ["value"],
-                "properties": {
-                  "value": {
-                    "required": true
-                  }
-                }
-              }
-            },
-            {
-              "if": {
-                "properties": { "action": { "not": { "const": "brightness" } } }
-              },
-              "then": {
-                "properties": {
-                  "value": {
-                    "type": null
-                  }
-                }
+                "required": ["value"]
               }
             }
           ]
