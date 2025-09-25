@@ -15,7 +15,7 @@ class IPortSMButtonsPlatform {
     this.port = this.config.port || 10001;
     this.timeout = this.config.timeout || 5000;
     this.reconnectDelay = this.config.reconnectDelay || 5000;
-    this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500; // ms
+    this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500;
     this.directControlPort = this.config.directControlPort || 3000;
 
     this.buttonServices = [];
@@ -26,16 +26,14 @@ class IPortSMButtonsPlatform {
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
     this.eventQueue = [];
-
-    // Retry queue for bulbs
-    this.retryQueue = [];
+    this.retryQueue = []; // Retry queue for LIFX actions
 
     // LIFX client
     this.lifx = new LifxClient();
     this.lifx.init();
     this.lifx.on('light-new', light => {
       this.log(`Discovered LIFX bulb: ${light.id} (${light.address})`);
-      this.processRetryQueue(light.id);
+      this.processRetryQueue();
     });
     this.lifx.on('error', err => {
       this.log(`LIFX error: ${err.message}`);
@@ -46,7 +44,7 @@ class IPortSMButtonsPlatform {
     this.app.use(express.json());
     this.server = null;
 
-    // mode colors for iPort LED
+    // LED colors
     this.modeColors = {
       yellow: { r: 255, g: 255, b: 0 },
       red: { r: 255, g: 0, b: 0 },
@@ -90,7 +88,7 @@ class IPortSMButtonsPlatform {
     });
   }
 
-  // ---------------- iPort TCP connection ----------------
+  // ---------------- iPort TCP ----------------
   connect() {
     if (!this.ip) {
       this.log.error('No IP configured for iPort device');
@@ -156,11 +154,14 @@ class IPortSMButtonsPlatform {
       const newG = parseInt(padded.substr(3, 3), 10);
       const newB = parseInt(padded.substr(6, 3), 10);
       this.ledColor = { r: newR, g: newG, b: newB };
-    } catch (err) {}
+    } catch (err) {
+      // ignore
+    }
   }
 
   // ---------------- Button events ----------------
   queueOrHandleEvent(buttonIndex, state) {
+    this.log(`Queue or handle event: button ${buttonIndex + 1}, state ${state}`);
     if (this.buttonServices.length === 0) {
       this.eventQueue.push({ buttonIndex, state });
     } else {
@@ -190,6 +191,7 @@ class IPortSMButtonsPlatform {
 
   triggerButtonEvent(buttonIndex, eventType) {
     if (this.isShuttingDown) return;
+    this.log(`Button ${buttonIndex + 1} triggered single press`);
     if (eventType === 0) {
       this.executeButtonAction(buttonIndex + 1);
     }
@@ -203,82 +205,79 @@ class IPortSMButtonsPlatform {
     }
 
     const actions = this.buttonMappings.filter(a => a.buttonNumber === buttonNumber);
-    if (!actions.length) return;
+    if (actions.length === 0) {
+      this.log(`No actions configured for button ${buttonNumber}`);
+      return;
+    }
 
     const currentMode = this.getCurrentMode();
+    this.log(`Current LED mode: ${currentMode}`);
 
     for (const action of actions) {
-      if (action.modeColor !== 'any' && action.modeColor !== currentMode) continue;
+      if (action.modeColor !== 'any' && action.modeColor !== currentMode) {
+        this.log(`Skipping action for button ${buttonNumber}, requires ${action.modeColor}`);
+        continue;
+      }
 
       if (action.actionType === 'lifx') {
-        this.handleLifxActionWithRetry(action);
+        this.handleLifxAction(action);
+      } else {
+        this.log(`Unsupported actionType: ${action.actionType}`);
       }
     }
   }
 
-  handleLifxActionWithRetry(action) {
+  handleLifxAction(action) {
     const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
 
     ids.forEach(id => {
       const bulb = this.lifx.light(id);
       if (!bulb) {
-        this.log(`LIFX bulb ${id} not found yet, queuing action`);
-        this.retryQueue.push({ action, id });
+        this.log(`LIFX bulb ${id} not found yet, adding to retry queue`);
+        this.retryQueue.push(action);
         return;
       }
 
-      switch (action.action) {
-        case 'on':
-          bulb.on(0, () => this.log(`Turned on LIFX ${id}`));
-          break;
-        case 'off':
-          bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
-          break;
-        case 'brightness':
-          if (typeof action.value !== 'number') {
-            this.log(`Brightness action missing value for bulb ${id}`);
-            break;
+      if (action.action === 'on') {
+        bulb.on(0, () => this.log(`Turned on LIFX ${id}`));
+      } else if (action.action === 'off') {
+        bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
+      } else if (action.action === 'brightness') {
+        bulb.getState((err, state) => {
+          if (err) {
+            this.log(`Error getting state of LIFX ${id}: ${err.message}`);
+            this.retryQueue.push(action);
+            return;
           }
-          bulb.getState((err, state) => {
-            if (err) {
-              this.log(`Error getting state for ${id}: ${err.message}, re-queueing`);
-              this.retryQueue.push({ action, id });
-              return;
-            }
-            const hue = typeof state.hue === 'number' ? state.hue : 0;
-            const saturation = typeof state.saturation === 'number' ? state.saturation : 0;
-            const kelvin = typeof state.kelvin === 'number' ? state.kelvin : 3500;
-            const brightness = Math.max(0, Math.min(1, action.value / 100));
-            bulb.color(hue, saturation, brightness, kelvin, 350, () => {});
-            this.log(`Set LIFX ${id} brightness to ${action.value}%`);
+
+          const hue = state.hue || 0;
+          const saturation = state.saturation || 0;
+          const kelvin = state.kelvin || 3500;
+          const brightness = Math.max(0, Math.min(100, action.value));
+
+          bulb.color(hue, saturation, brightness, kelvin, 0, () => {
+            this.log(`Set LIFX ${id} brightness to ${brightness}%`);
           });
-          break;
-        default:
-          this.log(`Unknown LIFX action: ${action.action}`);
-      }
-    });
-  }
-
-  processRetryQueue(lightId) {
-    if (!this.retryQueue.length) return;
-
-    const remaining = [];
-    this.retryQueue.forEach(item => {
-      if (item.id === lightId) {
-        this.log(`Retrying queued action for bulb ${lightId}`);
-        this.handleLifxActionWithRetry(item.action);
+        });
       } else {
-        remaining.push(item);
+        this.log(`Unknown LIFX action: ${action.action}`);
       }
     });
-    this.retryQueue = remaining;
   }
 
-  // ---------------- LED ----------------
+  processRetryQueue() {
+    if (this.retryQueue.length === 0) return;
+    this.log(`Processing LIFX retry queue (${this.retryQueue.length} items)`);
+    const queue = [...this.retryQueue];
+    this.retryQueue = [];
+    queue.forEach(action => this.handleLifxAction(action));
+  }
+
   cycleLEDColor() {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
     const color = this.modeColors[colorName];
+    this.log(`Button 10 pressed: Cycling to ${colorName}`);
     this.setLED(color.r, color.g, color.b);
   }
 
@@ -297,22 +296,26 @@ class IPortSMButtonsPlatform {
     return 'unknown';
   }
 
+  // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
-    const cmd = `\rled=${r.toString().padStart(3,'0')}${g.toString().padStart(3,'0')}${b.toString().padStart(3,'0')}\r`;
+    const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
     try {
       this.socket.write(cmd);
       this.ledColor = { r, g, b };
-    } catch(e) {}
+    } catch (e) {}
   }
 
   queryLED() {
     if (!this.connected || this.isShuttingDown) return;
-    try { this.socket.write('\rled=?\r'); } catch(e) {}
+    try {
+      this.socket.write('\rled=?\r');
+    } catch (e) {}
   }
 
-  // ---------------- Homebridge ----------------
+  // ---------------- Homebridge Accessories ----------------
   accessories(callback) {
+    this.log('Setting up dummy accessories (for buttons only)');
     try {
       const PlatformAccessory = this.api.platformAccessory;
       const uuidStr = this.api.hap.uuid.generate(this.config.name || 'iPort SM Buttons LAN');
@@ -331,7 +334,8 @@ class IPortSMButtonsPlatform {
       }
 
       callback([this.accessory]);
-    } catch(e) {
+    } catch (e) {
+      this.log(`Error in accessories setup: ${e.message}`);
       callback([]);
     }
   }
@@ -340,6 +344,7 @@ class IPortSMButtonsPlatform {
     this.accessory = accessory;
   }
 
+  // ---------------- HTTP Server ----------------
   startDirectControlServer() {
     this.app.post('/action/button/:buttonNumber', (req, res) => {
       const buttonNumber = parseInt(req.params.buttonNumber, 10);
