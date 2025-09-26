@@ -26,7 +26,7 @@ class IPortSMButtonsPlatform {
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
     this.eventQueue = [];
-    this.retryQueue = []; // Retry queue for LIFX actions
+    this.retryQueue = []; // retry queue with backoff
 
     // LIFX client
     this.lifx = new LifxClient();
@@ -234,7 +234,7 @@ class IPortSMButtonsPlatform {
       const bulb = this.lifx.light(id);
       if (!bulb) {
         this.log(`LIFX bulb ${id} not found yet, adding to retry queue`);
-        this.retryQueue.push(action);
+        this.addToRetryQueue(action, id);
         return;
       }
 
@@ -243,21 +243,9 @@ class IPortSMButtonsPlatform {
       } else if (action.action === 'off') {
         bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
       } else if (action.action === 'brightness') {
-        bulb.getState((err, state) => {
-          if (err) {
-            this.log(`Error getting state of LIFX ${id}: ${err.message}`);
-            this.retryQueue.push(action);
-            return;
-          }
-
-          const hue = state.hue || 0;
-          const saturation = state.saturation || 0;
-          const kelvin = state.kelvin || 3500;
-          const brightness = Math.max(0, Math.min(100, action.value));
-
-          bulb.color(hue, saturation, brightness, kelvin, 0, () => {
-            this.log(`Set LIFX ${id} brightness to ${brightness}%`);
-          });
+        const brightness = Math.max(0, Math.min(100, action.value));
+        bulb.setBrightness(brightness / 100, 0, () => {
+          this.log(`Set LIFX ${id} brightness to ${brightness}%`);
         });
       } else {
         this.log(`Unknown LIFX action: ${action.action}`);
@@ -265,12 +253,51 @@ class IPortSMButtonsPlatform {
     });
   }
 
+  // Retry queue with exponential backoff
+  addToRetryQueue(action, id) {
+    const now = Date.now();
+    this.retryQueue.push({
+      action,
+      id,
+      attempt: 0,
+      firstAttempt: now
+    });
+  }
+
   processRetryQueue() {
     if (this.retryQueue.length === 0) return;
-    this.log(`Processing LIFX retry queue (${this.retryQueue.length} items)`);
-    const queue = [...this.retryQueue];
-    this.retryQueue = [];
-    queue.forEach(action => this.handleLifxAction(action));
+
+    const now = Date.now();
+    const stillPending = [];
+
+    this.retryQueue.forEach(item => {
+      const elapsed = now - item.firstAttempt;
+      if (elapsed > 5 * 60 * 1000) {
+        this.log(`Stopping retries for LIFX bulb ${item.id} after 5 minutes`);
+        return;
+      }
+
+      const delay = Math.min(30000, 1000 * Math.pow(2, item.attempt)); // exponential up to 30s
+      if (!item.nextTry || now >= item.nextTry) {
+        this.log(`Retrying action for LIFX bulb ${item.id}, attempt ${item.attempt + 1}`);
+        item.attempt++;
+        item.nextTry = now + delay;
+
+        const bulb = this.lifx.light(item.id);
+        if (bulb) {
+          this.handleLifxAction(item.action);
+        } else {
+          stillPending.push(item);
+        }
+      } else {
+        stillPending.push(item);
+      }
+    });
+
+    this.retryQueue = stillPending;
+    if (this.retryQueue.length > 0) {
+      setTimeout(() => this.processRetryQueue(), 1000);
+    }
   }
 
   cycleLEDColor() {
@@ -359,6 +386,6 @@ class IPortSMButtonsPlatform {
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes)');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes + retry)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
