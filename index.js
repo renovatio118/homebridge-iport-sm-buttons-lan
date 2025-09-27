@@ -2,7 +2,7 @@ const net = require('net');
 const express = require('express');
 const LifxClient = require('node-lifx').Client;
 
-console.log('Loading iPortSMButtonsLAN plugin (LIFX edition)');
+console.log('Loading iPortSMButtonsLAN plugin (LIFX edition, no retries)');
 
 class IPortSMButtonsPlatform {
   constructor(log, config, api) {
@@ -26,14 +26,12 @@ class IPortSMButtonsPlatform {
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
     this.eventQueue = [];
-    this.retryQueue = []; // retry queue with backoff
 
     // LIFX client
     this.lifx = new LifxClient();
     this.lifx.init();
     this.lifx.on('light-new', light => {
       this.log(`Discovered LIFX bulb: ${light.id} (${light.address})`);
-      this.processRetryQueue();
     });
     this.lifx.on('error', err => {
       this.log(`LIFX error: ${err.message}`);
@@ -64,7 +62,7 @@ class IPortSMButtonsPlatform {
       return;
     }
 
-    this.log('IPortSMButtonsPlatform initialized (LIFX only)');
+    this.log('IPortSMButtonsPlatform initialized (LIFX only, no retries)');
 
     this.startDirectControlServer();
     this.connect();
@@ -233,8 +231,7 @@ class IPortSMButtonsPlatform {
     ids.forEach(id => {
       const bulb = this.lifx.light(id);
       if (!bulb) {
-        this.log(`LIFX bulb ${id} not found yet, adding to retry queue`);
-        this.addToRetryQueue(action, id);
+        this.log(`LIFX bulb ${id} not found (not discovered yet)`);
         return;
       }
 
@@ -251,53 +248,6 @@ class IPortSMButtonsPlatform {
         this.log(`Unknown LIFX action: ${action.action}`);
       }
     });
-  }
-
-  // Retry queue with exponential backoff
-  addToRetryQueue(action, id) {
-    const now = Date.now();
-    this.retryQueue.push({
-      action,
-      id,
-      attempt: 0,
-      firstAttempt: now
-    });
-  }
-
-  processRetryQueue() {
-    if (this.retryQueue.length === 0) return;
-
-    const now = Date.now();
-    const stillPending = [];
-
-    this.retryQueue.forEach(item => {
-      const elapsed = now - item.firstAttempt;
-      if (elapsed > 5 * 60 * 1000) {
-        this.log(`Stopping retries for LIFX bulb ${item.id} after 5 minutes`);
-        return;
-      }
-
-      const delay = Math.min(30000, 1000 * Math.pow(2, item.attempt)); // exponential up to 30s
-      if (!item.nextTry || now >= item.nextTry) {
-        this.log(`Retrying action for LIFX bulb ${item.id}, attempt ${item.attempt + 1}`);
-        item.attempt++;
-        item.nextTry = now + delay;
-
-        const bulb = this.lifx.light(item.id);
-        if (bulb) {
-          this.handleLifxAction(item.action);
-        } else {
-          stillPending.push(item);
-        }
-      } else {
-        stillPending.push(item);
-      }
-    });
-
-    this.retryQueue = stillPending;
-    if (this.retryQueue.length > 0) {
-      setTimeout(() => this.processRetryQueue(), 1000);
-    }
   }
 
   cycleLEDColor() {
@@ -386,6 +336,6 @@ class IPortSMButtonsPlatform {
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes + retry)');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX only, no retries)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
