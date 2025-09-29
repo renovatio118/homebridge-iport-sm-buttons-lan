@@ -97,6 +97,9 @@ class IPortSMButtonsPlatform {
     this.socket = new net.Socket();
     this.socket.setTimeout(this.timeout);
 
+    // enable TCP keep-alive (10s initial delay)
+    this.socket.setKeepAlive(true, 10000);
+
     this.socket.connect(this.port, this.ip, () => {
       this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
