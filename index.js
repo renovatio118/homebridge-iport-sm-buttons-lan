@@ -13,9 +13,9 @@ class IPortSMButtonsPlatform {
     // network/config
     this.ip = this.config.ip || '192.168.2.12';
     this.port = this.config.port || 10001;
-    this.timeout = this.config.timeout || 10000;
-    this.reconnectDelay = this.config.reconnectDelay || 10000; // Start with 10 seconds
-    this.maxReconnectDelay = this.config.maxReconnectDelay || 300000; // Max 5 minutes
+    this.timeout = this.config.timeout || 30000; // Increased to 30 seconds
+    this.reconnectDelay = this.config.reconnectDelay || 10000;
+    this.maxReconnectDelay = this.config.maxReconnectDelay || 300000;
     this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500;
     this.directControlPort = this.config.directControlPort || 3000;
 
@@ -24,6 +24,7 @@ class IPortSMButtonsPlatform {
     this.maxReconnectAttempts = this.config.maxReconnectAttempts || 10;
     this.lastDataReceived = 0;
     this.healthCheckInterval = null;
+    this.lastKeepAliveSent = 0;
 
     this.buttonServices = [];
     this.buttonStates = Array.from({ length: 10 }, () => ({ state: 0, lastPress: 0 }));
@@ -122,14 +123,14 @@ class IPortSMButtonsPlatform {
     this.log(`Connecting to ${this.ip}:${this.port}`);
     this.socket = new net.Socket();
     
-    // Enhanced socket settings
-    this.socket.setTimeout(10000); // 10 second timeout
-    this.socket.setKeepAlive(true, 10000); // Keep-alive every 10 seconds
-    this.socket.setNoDelay(true); // Disable Nagle's algorithm for real-time communication
+    // Enhanced socket settings - disable timeout for keep-alive to handle it ourselves
+    this.socket.setTimeout(0); // Disable automatic timeout
+    this.socket.setKeepAlive(true, 30000); // Keep-alive every 30 seconds
+    this.socket.setNoDelay(true);
 
     const connectionTimeout = setTimeout(() => {
       if (!this.connected) {
-        this.log('Connection timeout');
+        this.log('Connection timeout during initial connection');
         this.socket.destroy();
       }
     }, 15000);
@@ -140,6 +141,7 @@ class IPortSMButtonsPlatform {
       this.connected = true;
       this.reconnectAttempts = 0;
       this.retryScheduled = false;
+      this.lastDataReceived = Date.now();
       
       if (this.retryTimer) {
         clearTimeout(this.retryTimer);
@@ -166,10 +168,7 @@ class IPortSMButtonsPlatform {
       this.handleDisconnection();
     });
 
-    this.socket.on('timeout', () => {
-      this.log('Socket timeout - device may be unresponsive');
-      this.socket.destroy();
-    });
+    // We'll handle timeouts manually via our health check
   }
 
   handleDeviceData(data) {
@@ -221,25 +220,32 @@ class IPortSMButtonsPlatform {
     if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
 
-    // Send keep-alive every 30 seconds (more frequent than manual recommendation)
+    // Send keep-alive every 25 seconds
     this.keepAliveInterval = setInterval(() => {
       if (this.connected && !this.isShuttingDown) {
+        this.lastKeepAliveSent = Date.now();
         this.queryLED();
       }
-    }, 30000);
+    }, 25000);
 
-    // Health check - verify we're receiving data
+    // Health check - verify we're receiving data and connection is alive
     this.healthCheckInterval = setInterval(() => {
       if (this.connected && !this.isShuttingDown) {
         const timeSinceLastData = Date.now() - (this.lastDataReceived || 0);
+        const timeSinceLastKeepAlive = Date.now() - (this.lastKeepAliveSent || 0);
         
-        // If no data received in 2 minutes, force reconnection
-        if (timeSinceLastData > 120000) {
-          this.log('Health check failed - no data received, reconnecting...');
+        // If no data received in 60 seconds, force reconnection
+        if (timeSinceLastData > 60000) {
+          this.log('Health check failed - no data received in 60 seconds, reconnecting...');
           this.handleDisconnection();
         }
+        // If we sent a keep-alive but got no response in 30 seconds
+        else if (timeSinceLastKeepAlive > 0 && timeSinceLastKeepAlive < 30000 && timeSinceLastData > timeSinceLastKeepAlive + 10000) {
+          this.log('Health check warning - keep-alive not acknowledged, sending test query...');
+          this.queryLED();
+        }
       }
-    }, 60000); // Check every minute
+    }, 30000); // Check every 30 seconds
   }
 
   cleanupConnection() {
