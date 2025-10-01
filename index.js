@@ -13,9 +13,17 @@ class IPortSMButtonsPlatform {
     // network/config
     this.ip = this.config.ip || '192.168.2.12';
     this.port = this.config.port || 10001;
-    this.timeout = this.config.timeout || 5000;
+    this.timeout = this.config.timeout || 10000;
+    this.reconnectDelay = this.config.reconnectDelay || 10000; // Start with 10 seconds
+    this.maxReconnectDelay = this.config.maxReconnectDelay || 300000; // Max 5 minutes
     this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500;
     this.directControlPort = this.config.directControlPort || 3000;
+
+    // Enhanced connection management
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = this.config.maxReconnectAttempts || 10;
+    this.lastDataReceived = 0;
+    this.healthCheckInterval = null;
 
     this.buttonServices = [];
     this.buttonStates = Array.from({ length: 10 }, () => ({ state: 0, lastPress: 0 }));
@@ -24,8 +32,8 @@ class IPortSMButtonsPlatform {
     this.socket = null;
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
-    this.reconnectScheduled = false;
-    this.lastHeartbeatAck = 0;
+    this.retryTimer = null;
+    this.retryScheduled = false;
 
     // LIFX client
     this.lifx = new LifxClient();
@@ -77,93 +85,180 @@ class IPortSMButtonsPlatform {
 
     this.api.on('shutdown', () => {
       this.isShuttingDown = true;
-      this.log('Homebridge shutting down, closing socket and HTTP server');
-      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
-      if (this.socket) this.socket.destroy();
-      if (this.server) this.server.close();
-      try { this.lifx.destroy(); } catch (e) {}
+      this.log('Homebridge shutting down, closing connections...');
+      
+      this.cleanupConnection();
+      
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+      
+      if (this.server) {
+        this.server.close();
+      }
+      
+      try { 
+        this.lifx.destroy(); 
+      } catch (e) {
+        this.log(`Error destroying LIFX client: ${e.message}`);
+      }
     });
   }
 
-  // ---------------- iPort TCP ----------------
+  // ---------------- Enhanced iPort TCP Connection ----------------
   connect() {
     if (!this.ip) {
       this.log.error('No IP configured for iPort device');
       return;
     }
 
+    // Clear any existing connection
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
+
+    this.log(`Connecting to ${this.ip}:${this.port}`);
     this.socket = new net.Socket();
-    this.socket.setTimeout(this.timeout);
+    
+    // Enhanced socket settings
+    this.socket.setTimeout(10000); // 10 second timeout
+    this.socket.setKeepAlive(true, 10000); // Keep-alive every 10 seconds
+    this.socket.setNoDelay(true); // Disable Nagle's algorithm for real-time communication
+
+    const connectionTimeout = setTimeout(() => {
+      if (!this.connected) {
+        this.log('Connection timeout');
+        this.socket.destroy();
+      }
+    }, 15000);
 
     this.socket.connect(this.port, this.ip, () => {
-      if (!this.connected) this.log(`Connected to ${this.ip}:${this.port}`);
+      clearTimeout(connectionTimeout);
+      this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
-      this.lastHeartbeatAck = Date.now();
-      this.reconnectScheduled = false;
-
-      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
-      this.keepAliveInterval = setInterval(() => this.sendHeartbeat(), 30000);
-
-      this.queryLED(); // initial query
+      this.reconnectAttempts = 0;
+      this.retryScheduled = false;
+      
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+      
+      // Start enhanced keep-alive
+      this.startEnhancedKeepAlive();
     });
 
     this.socket.on('data', data => {
-      const str = data.toString().trim();
-      this.lastHeartbeatAck = Date.now(); // heartbeat ack updated
-
-      try {
-        const json = JSON.parse(str);
-        if (json.led) this.parseAndSetLedFromString(String(json.led));
-        if (json.events) {
-          json.events.forEach(event => {
-            const keyNum = parseInt(event.label.split(' ')[1], 10) - 1;
-            const state = parseInt(event.state, 10);
-            this.handleButtonEvent(keyNum, state);
-          });
-        }
-      } catch (e) {
-        if (str.includes('led=')) {
-          const ledValue = str.split('led=')[1]?.trim();
-          if (ledValue) this.parseAndSetLedFromString(ledValue);
-        }
-      }
+      this.handleDeviceData(data);
     });
 
-    this.socket.on('error', () => {
-      this.connected = false;
-      this.scheduleReconnectOnce();
+    this.socket.on('error', err => {
+      clearTimeout(connectionTimeout);
+      this.log(`Socket error: ${err.message}`);
+      this.handleDisconnection();
     });
 
     this.socket.on('close', () => {
-      this.connected = false;
-      this.scheduleReconnectOnce();
+      clearTimeout(connectionTimeout);
+      this.log('Connection closed');
+      this.handleDisconnection();
     });
 
     this.socket.on('timeout', () => {
-      try { this.socket.destroy(); } catch (e) {}
+      this.log('Socket timeout - device may be unresponsive');
+      this.socket.destroy();
     });
   }
 
-  sendHeartbeat() {
-    if (!this.connected || this.isShuttingDown) return;
-
-    const now = Date.now();
-    if (now - this.lastHeartbeatAck > 180000) { // 3 minutes timeout
-      this.scheduleReconnectOnce();
-      return;
+  handleDeviceData(data) {
+    const str = data.toString().trim();
+    this.lastDataReceived = Date.now();
+    
+    try {
+      const json = JSON.parse(str);
+      if (json.led) this.parseAndSetLedFromString(String(json.led));
+      if (json.events) {
+        json.events.forEach(event => {
+          const keyNum = parseInt(event.label.split(' ')[1], 10) - 1;
+          const state = parseInt(event.state, 10);
+          this.handleButtonEvent(keyNum, state);
+        });
+      }
+    } catch (e) {
+      if (str.includes('led=')) {
+        const ledValue = str.split('led=')[1]?.trim();
+        if (ledValue) this.parseAndSetLedFromString(ledValue);
+      }
     }
-
-    try { this.socket.write('\rled=?\r'); } catch {} // silent heartbeat
   }
 
-  scheduleReconnectOnce() {
-    if (this.isShuttingDown || this.reconnectScheduled) return;
-    this.reconnectScheduled = true;
-    this.log('Connection lost. Will attempt reconnect in 2 minutes...');
-    setTimeout(() => {
-      this.reconnectScheduled = false;
-      if (!this.isShuttingDown) this.connect();
-    }, 120000);
+  handleDisconnection() {
+    if (this.isShuttingDown) return;
+    
+    this.connected = false;
+    this.cleanupConnection();
+    
+    // Exponential backoff for reconnection
+    const baseDelay = this.reconnectDelay;
+    const maxDelay = this.maxReconnectDelay;
+    const delay = Math.min(maxDelay, baseDelay * Math.pow(2, Math.min(this.reconnectAttempts, 5)));
+    
+    this.reconnectAttempts++;
+    this.retryScheduled = true;
+    
+    this.log(`Retrying connection in ${Math.round(delay / 1000)} seconds (attempt ${this.reconnectAttempts})...`);
+    
+    this.retryTimer = setTimeout(() => {
+      this.retryScheduled = false;
+      this.connect();
+    }, delay);
+  }
+
+  startEnhancedKeepAlive() {
+    // Clear any existing intervals
+    if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
+    if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+
+    // Send keep-alive every 30 seconds (more frequent than manual recommendation)
+    this.keepAliveInterval = setInterval(() => {
+      if (this.connected && !this.isShuttingDown) {
+        this.queryLED();
+      }
+    }, 30000);
+
+    // Health check - verify we're receiving data
+    this.healthCheckInterval = setInterval(() => {
+      if (this.connected && !this.isShuttingDown) {
+        const timeSinceLastData = Date.now() - (this.lastDataReceived || 0);
+        
+        // If no data received in 2 minutes, force reconnection
+        if (timeSinceLastData > 120000) {
+          this.log('Health check failed - no data received, reconnecting...');
+          this.handleDisconnection();
+        }
+      }
+    }, 60000); // Check every minute
+  }
+
+  cleanupConnection() {
+    this.connected = false;
+    
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = null;
+    }
+    
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+    
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
   }
 
   parseAndSetLedFromString(ledValue) {
@@ -174,7 +269,9 @@ class IPortSMButtonsPlatform {
       const newG = parseInt(padded.substr(3, 3), 10);
       const newB = parseInt(padded.substr(6, 3), 10);
       this.ledColor = { r: newR, g: newG, b: newB };
-    } catch (err) {}
+    } catch (err) {
+      // ignore
+    }
   }
 
   // ---------------- Button events ----------------
@@ -214,8 +311,15 @@ class IPortSMButtonsPlatform {
     this.log(`Current LED mode: ${currentMode}`);
 
     for (const action of actions) {
-      if (action.modeColor !== 'any' && action.modeColor !== currentMode) continue;
-      if (action.actionType === 'lifx') this.handleLifxAction(action);
+      if (action.modeColor !== 'any' && action.modeColor !== currentMode) {
+        this.log(`Skipping action for button ${buttonNumber}, requires ${action.modeColor}`);
+        continue;
+      }
+      if (action.actionType === 'lifx') {
+        this.handleLifxAction(action);
+      } else {
+        this.log(`Unsupported actionType: ${action.actionType}`);
+      }
     }
   }
 
@@ -223,17 +327,27 @@ class IPortSMButtonsPlatform {
     const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
     ids.forEach(id => {
       const bulb = this.lifx.light(id);
-      if (!bulb) return;
-      if (action.action === 'on') bulb.on(0);
-      else if (action.action === 'off') bulb.off(0);
-      else if (action.action === 'brightness') {
+      if (!bulb) {
+        this.log(`LIFX bulb ${id} not found`);
+        return;
+      }
+      if (action.action === 'on') {
+        bulb.on(0, () => this.log(`Turned on LIFX ${id}`));
+      } else if (action.action === 'off') {
+        bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
+      } else if (action.action === 'brightness') {
         bulb.getState((err, state) => {
-          if (err) return;
+          if (err) {
+            this.log(`Error getting state of LIFX ${id}: ${err.message}`);
+            return;
+          }
           const hue = state.hue || 0;
           const saturation = state.saturation || 0;
           const kelvin = state.kelvin || 3500;
           const brightness = Math.max(0, Math.min(100, action.value));
-          bulb.color(hue, saturation, brightness, kelvin, 0);
+          bulb.color(hue, saturation, brightness, kelvin, 0, () => {
+            this.log(`Set LIFX ${id} brightness to ${brightness}%`);
+          });
         });
       }
     });
@@ -255,8 +369,8 @@ class IPortSMButtonsPlatform {
     g = Math.round((g / max) * 255);
     b = Math.round((b / max) * 255);
     for (const mode in this.modeColors) {
-      const mc = this.modeColors[mode];
-      if (r === mc.r && g === mc.g && b === mc.b) return mode;
+      const modeColor = this.modeColors[mode];
+      if (r === modeColor.r && g === modeColor.g && b === modeColor.b) return mode;
     }
     return 'unknown';
   }
@@ -264,17 +378,23 @@ class IPortSMButtonsPlatform {
   // ---------------- LED control ----------------
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
-    const cmd = `\rled=${r.toString().padStart(3,'0')}${g.toString().padStart(3,'0')}${b.toString().padStart(3,'0')}\r`;
-    try { this.socket.write(cmd); this.ledColor = { r, g, b }; } catch {}
+    const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
+    try {
+      this.socket.write(cmd);
+      this.ledColor = { r, g, b };
+    } catch (e) {}
   }
 
   queryLED() {
     if (!this.connected || this.isShuttingDown) return;
-    try { this.socket.write('\rled=?\r'); } catch {}
+    try {
+      this.socket.write('\rled=?\r');
+    } catch (e) {}
   }
 
   // ---------------- Homebridge Accessories ----------------
   accessories(callback) {
+    this.log('Setting up dummy accessories (for buttons only)');
     try {
       const PlatformAccessory = this.api.platformAccessory;
       const uuidStr = this.api.hap.uuid.generate(this.config.name || 'iPort SM Buttons LAN');
@@ -292,10 +412,15 @@ class IPortSMButtonsPlatform {
         this.buttonServices[i - 1] = buttonService;
       }
       callback([this.accessory]);
-    } catch (e) { callback([]); }
+    } catch (e) {
+      this.log(`Error in accessories setup: ${e.message}`);
+      callback([]);
+    }
   }
 
-  configureAccessory(accessory) { this.accessory = accessory; }
+  configureAccessory(accessory) {
+    this.accessory = accessory;
+  }
 
   // ---------------- HTTP Server ----------------
   startDirectControlServer() {
@@ -311,6 +436,6 @@ class IPortSMButtonsPlatform {
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with silent heartbeat)');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
