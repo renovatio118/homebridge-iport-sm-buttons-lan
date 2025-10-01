@@ -13,27 +13,44 @@
       "ip": {
         "title": "Device IP Address",
         "type": "string",
-        "placeholder": "192.168.2.12"
+        "placeholder": "192.168.2.12",
+        "description": "IP address of your iPort device"
       },
       "port": {
         "title": "Port",
         "type": "integer",
-        "default": 10001
+        "default": 10001,
+        "description": "TCP port for iPort device communication"
       },
       "timeout": {
         "title": "Connection Timeout (ms)",
         "type": "integer",
-        "default": 5000
+        "default": 10000,
+        "description": "Socket timeout in milliseconds"
       },
       "reconnectDelay": {
-        "title": "Reconnect Delay (ms)",
+        "title": "Initial Reconnect Delay (ms)",
         "type": "integer",
-        "default": 5000
+        "default": 10000,
+        "description": "Initial delay before reconnecting (will increase exponentially)"
+      },
+      "maxReconnectDelay": {
+        "title": "Maximum Reconnect Delay (ms)",
+        "type": "integer",
+        "default": 300000,
+        "description": "Maximum delay between reconnection attempts (5 minutes)"
+      },
+      "maxReconnectAttempts": {
+        "title": "Maximum Reconnect Attempts",
+        "type": "integer",
+        "default": 10,
+        "description": "Maximum number of reconnection attempts before giving up"
       },
       "directControlPort": {
         "title": "Direct Control HTTP Port",
         "type": "integer",
-        "default": 3000
+        "default": 3000,
+        "description": "Local HTTP server port for direct button control"
       },
       "buttonMappings": {
         "title": "Button Mappings",
