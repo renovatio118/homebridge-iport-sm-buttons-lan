@@ -14,7 +14,6 @@ class IPortSMButtonsPlatform {
     this.ip = this.config.ip || '192.168.2.12';
     this.port = this.config.port || 10001;
     this.timeout = this.config.timeout || 5000;
-    this.reconnectDelay = 5 * 60 * 1000; // 5 minutes
     this.triggerResetDelay = typeof this.config.triggerResetDelay === 'number' ? this.config.triggerResetDelay : 500;
     this.directControlPort = this.config.directControlPort || 3000;
 
@@ -25,8 +24,6 @@ class IPortSMButtonsPlatform {
     this.socket = null;
     this.isShuttingDown = false;
     this.keepAliveInterval = null;
-    this.retryTimer = null;
-    this.retryScheduled = false;
 
     // LIFX client
     this.lifx = new LifxClient();
@@ -80,7 +77,6 @@ class IPortSMButtonsPlatform {
       this.isShuttingDown = true;
       this.log('Homebridge shutting down, closing socket and HTTP server');
       if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
-      if (this.retryTimer) clearTimeout(this.retryTimer);
       if (this.socket) this.socket.destroy();
       if (this.server) this.server.close();
       try { this.lifx.destroy(); } catch (e) {}
@@ -97,21 +93,16 @@ class IPortSMButtonsPlatform {
     this.socket = new net.Socket();
     this.socket.setTimeout(this.timeout);
 
-    // enable TCP keep-alive (10s initial delay)
-    this.socket.setKeepAlive(true, 10000);
-
     this.socket.connect(this.port, this.ip, () => {
-      this.log(`Connected to ${this.ip}:${this.port}`);
+      if (!this.connected) this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
-      this.retryScheduled = false;
-      if (this.retryTimer) {
-        clearTimeout(this.retryTimer);
-        this.retryTimer = null;
-      }
-      this.queryLED();
+
+      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
       this.keepAliveInterval = setInterval(() => {
         if (this.connected && !this.isShuttingDown) this.queryLED();
-      }, 5000);
+      }, 30000); // every 30s
+
+      this.queryLED();
     });
 
     this.socket.on('data', data => {
@@ -136,30 +127,35 @@ class IPortSMButtonsPlatform {
 
     this.socket.on('error', err => {
       this.log(`Socket error: ${err.message}`);
-      this.scheduleReconnect();
+      this.reconnect();
     });
 
     this.socket.on('close', () => {
-      this.log('Connection closed');
-      this.scheduleReconnect();
+      if (this.connected) this.log('Connection closed');
+      this.connected = false;
+      this.reconnect();
     });
 
     this.socket.on('timeout', () => {
-      try { this.socket.destroy(); } catch (e) {}
+      this.socket.destroy();
     });
   }
 
-  scheduleReconnect() {
-    if (this.isShuttingDown || this.retryScheduled) return;
-    this.connected = false;
+  reconnect() {
+    if (this.isShuttingDown) return;
     if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
 
-    this.retryScheduled = true;
-    this.log(`Retrying connection in ${this.reconnectDelay / 1000 / 60} minutes...`);
-    this.retryTimer = setTimeout(() => {
-      this.retryScheduled = false;
-      this.connect();
-    }, this.reconnectDelay);
+    if (this.socket) {
+      try { this.socket.destroy(); } catch (e) {}
+      this.socket = null;
+    }
+
+    setTimeout(() => {
+      if (!this.isShuttingDown) {
+        this.log('Reconnecting to iPort...');
+        this.connect();
+      }
+    }, 2000); // small delay to avoid hammering
   }
 
   parseAndSetLedFromString(ledValue) {
