@@ -2,7 +2,7 @@ const net = require('net');
 const express = require('express');
 const LifxClient = require('node-lifx').Client;
 
-console.log('Loading iPortSMButtonsLAN plugin (LIFX edition)');
+console.log('Loading iPortSMButtonsLAN plugin (LIFX edition with heartbeat)');
 
 class IPortSMButtonsPlatform {
   constructor(log, config, api) {
@@ -23,7 +23,9 @@ class IPortSMButtonsPlatform {
     this.connected = false;
     this.socket = null;
     this.isShuttingDown = false;
-    this.keepAliveInterval = null;
+
+    this.heartbeatInterval = null;
+    this.lastHeartbeatAck = Date.now();
 
     // LIFX client
     this.lifx = new LifxClient();
@@ -60,7 +62,7 @@ class IPortSMButtonsPlatform {
       return;
     }
 
-    this.log('IPortSMButtonsPlatform initialized (LIFX only)');
+    this.log('IPortSMButtonsPlatform initialized (LIFX only, with heartbeat)');
 
     this.startDirectControlServer();
     this.connect();
@@ -68,7 +70,6 @@ class IPortSMButtonsPlatform {
     this.api.on('didFinishLaunching', () => {
       this.log('Homebridge finished launching');
       this.accessories(accs => {
-        this.log('Registering accessories after didFinishLaunching');
         this.api.registerPlatformAccessories('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', accs);
       });
     });
@@ -76,7 +77,7 @@ class IPortSMButtonsPlatform {
     this.api.on('shutdown', () => {
       this.isShuttingDown = true;
       this.log('Homebridge shutting down, closing socket and HTTP server');
-      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
+      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
       if (this.socket) this.socket.destroy();
       if (this.server) this.server.close();
       try { this.lifx.destroy(); } catch (e) {}
@@ -89,24 +90,25 @@ class IPortSMButtonsPlatform {
       this.log.error('No IP configured for iPort device');
       return;
     }
-    this.log(`Connecting to ${this.ip}:${this.port}`);
+
     this.socket = new net.Socket();
     this.socket.setTimeout(this.timeout);
 
     this.socket.connect(this.port, this.ip, () => {
       if (!this.connected) this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
+      this.lastHeartbeatAck = Date.now();
 
-      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
-      this.keepAliveInterval = setInterval(() => {
-        if (this.connected && !this.isShuttingDown) this.queryLED();
-      }, 30000); // every 30s
+      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 60000); // every 60s
 
       this.queryLED();
     });
 
     this.socket.on('data', data => {
       const str = data.toString().trim();
+      this.lastHeartbeatAck = Date.now();
+
       try {
         const json = JSON.parse(str);
         if (json.led) this.parseAndSetLedFromString(String(json.led));
@@ -125,25 +127,30 @@ class IPortSMButtonsPlatform {
       }
     });
 
-    this.socket.on('error', err => {
-      this.log(`Socket error: ${err.message}`);
-      this.reconnect();
-    });
-
+    this.socket.on('error', () => this.reconnect());
     this.socket.on('close', () => {
       if (this.connected) this.log('Connection closed');
       this.connected = false;
       this.reconnect();
     });
+    this.socket.on('timeout', () => this.socket.destroy());
+  }
 
-    this.socket.on('timeout', () => {
-      this.socket.destroy();
-    });
+  sendHeartbeat() {
+    if (!this.connected || this.isShuttingDown) return;
+
+    const now = Date.now();
+    if (now - this.lastHeartbeatAck > 120000) { // 2 minutes without reply
+      this.log('Heartbeat missed — reconnecting');
+      this.reconnect();
+      return;
+    }
+    this.queryLED(); // sends "led=?" as keepalive
   }
 
   reconnect() {
     if (this.isShuttingDown) return;
-    if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
 
     if (this.socket) {
       try { this.socket.destroy(); } catch (e) {}
@@ -155,20 +162,19 @@ class IPortSMButtonsPlatform {
         this.log('Reconnecting to iPort...');
         this.connect();
       }
-    }, 2000); // small delay to avoid hammering
+    }, 2000);
   }
 
   parseAndSetLedFromString(ledValue) {
     try {
       const s = String(ledValue).trim();
       const padded = s.padStart(9, '0').substr(0, 9);
-      const newR = parseInt(padded.substr(0, 3), 10);
-      const newG = parseInt(padded.substr(3, 3), 10);
-      const newB = parseInt(padded.substr(6, 3), 10);
-      this.ledColor = { r: newR, g: newG, b: newB };
-    } catch (err) {
-      // ignore
-    }
+      this.ledColor = {
+        r: parseInt(padded.substr(0, 3), 10),
+        g: parseInt(padded.substr(3, 3), 10),
+        b: parseInt(padded.substr(6, 3), 10)
+      };
+    } catch {}
   }
 
   // ---------------- Button events ----------------
@@ -199,24 +205,12 @@ class IPortSMButtonsPlatform {
     }
 
     const actions = this.buttonMappings.filter(a => a.buttonNumber === buttonNumber);
-    if (actions.length === 0) {
-      this.log(`No actions configured for button ${buttonNumber}`);
-      return;
-    }
+    if (actions.length === 0) return;
 
     const currentMode = this.getCurrentMode();
-    this.log(`Current LED mode: ${currentMode}`);
-
     for (const action of actions) {
-      if (action.modeColor !== 'any' && action.modeColor !== currentMode) {
-        this.log(`Skipping action for button ${buttonNumber}, requires ${action.modeColor}`);
-        continue;
-      }
-      if (action.actionType === 'lifx') {
-        this.handleLifxAction(action);
-      } else {
-        this.log(`Unsupported actionType: ${action.actionType}`);
-      }
+      if (action.modeColor !== 'any' && action.modeColor !== currentMode) continue;
+      if (action.actionType === 'lifx') this.handleLifxAction(action);
     }
   }
 
@@ -224,27 +218,13 @@ class IPortSMButtonsPlatform {
     const ids = Array.isArray(action.targetId) ? action.targetId : [action.targetId];
     ids.forEach(id => {
       const bulb = this.lifx.light(id);
-      if (!bulb) {
-        this.log(`LIFX bulb ${id} not found`);
-        return;
-      }
-      if (action.action === 'on') {
-        bulb.on(0, () => this.log(`Turned on LIFX ${id}`));
-      } else if (action.action === 'off') {
-        bulb.off(0, () => this.log(`Turned off LIFX ${id}`));
-      } else if (action.action === 'brightness') {
+      if (!bulb) return;
+      if (action.action === 'on') bulb.on(0);
+      else if (action.action === 'off') bulb.off(0);
+      else if (action.action === 'brightness') {
         bulb.getState((err, state) => {
-          if (err) {
-            this.log(`Error getting state of LIFX ${id}: ${err.message}`);
-            return;
-          }
-          const hue = state.hue || 0;
-          const saturation = state.saturation || 0;
-          const kelvin = state.kelvin || 3500;
-          const brightness = Math.max(0, Math.min(100, action.value));
-          bulb.color(hue, saturation, brightness, kelvin, 0, () => {
-            this.log(`Set LIFX ${id} brightness to ${brightness}%`);
-          });
+          if (err) return;
+          bulb.color(state.hue || 0, state.saturation || 0, Math.max(0, Math.min(100, action.value)), state.kelvin || 3500, 0);
         });
       }
     });
@@ -254,7 +234,6 @@ class IPortSMButtonsPlatform {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
     const color = this.modeColors[colorName];
-    this.log(`Button 10 pressed: Cycling to ${colorName}`);
     this.setLED(color.r, color.g, color.b);
   }
 
@@ -266,8 +245,8 @@ class IPortSMButtonsPlatform {
     g = Math.round((g / max) * 255);
     b = Math.round((b / max) * 255);
     for (const mode in this.modeColors) {
-      const modeColor = this.modeColors[mode];
-      if (r === modeColor.r && g === modeColor.g && b === modeColor.b) return mode;
+      const mc = this.modeColors[mode];
+      if (r === mc.r && g === mc.g && b === mc.b) return mode;
     }
     return 'unknown';
   }
@@ -276,43 +255,33 @@ class IPortSMButtonsPlatform {
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3, '0')}${g.toString().padStart(3, '0')}${b.toString().padStart(3, '0')}\r`;
-    try {
-      this.socket.write(cmd);
-      this.ledColor = { r, g, b };
-    } catch (e) {}
+    try { this.socket.write(cmd); } catch {}
+    this.ledColor = { r, g, b };
   }
 
   queryLED() {
     if (!this.connected || this.isShuttingDown) return;
-    try {
-      this.socket.write('\rled=?\r');
-    } catch (e) {}
+    try { this.socket.write('\rled=?\r'); } catch {}
   }
 
   // ---------------- Homebridge Accessories ----------------
   accessories(callback) {
-    this.log('Setting up dummy accessories (for buttons only)');
-    try {
-      const PlatformAccessory = this.api.platformAccessory;
-      const uuidStr = this.api.hap.uuid.generate(this.config.name || 'iPort SM Buttons LAN');
-      this.accessory = new PlatformAccessory(this.config.name || 'iPort SM Buttons LAN', uuidStr);
+    const PlatformAccessory = this.api.platformAccessory;
+    const uuidStr = this.api.hap.uuid.generate(this.config.name || 'iPort SM Buttons LAN');
+    this.accessory = new PlatformAccessory(this.config.name || 'iPort SM Buttons LAN', uuidStr);
 
-      this.buttonServices = [];
-      for (let i = 1; i <= 10; i++) {
-        const buttonService = this.accessory.addService(
-          this.api.hap.Service.StatelessProgrammableSwitch,
-          `Button ${i}`, `button${i}`
-        );
-        if (this.api.hap.Characteristic.ServiceLabelIndex) {
-          buttonService.setCharacteristic(this.api.hap.Characteristic.ServiceLabelIndex, i);
-        }
-        this.buttonServices[i - 1] = buttonService;
+    this.buttonServices = [];
+    for (let i = 1; i <= 10; i++) {
+      const btn = this.accessory.addService(
+        this.api.hap.Service.StatelessProgrammableSwitch,
+        `Button ${i}`, `button${i}`
+      );
+      if (this.api.hap.Characteristic.ServiceLabelIndex) {
+        btn.setCharacteristic(this.api.hap.Characteristic.ServiceLabelIndex, i);
       }
-      callback([this.accessory]);
-    } catch (e) {
-      this.log(`Error in accessories setup: ${e.message}`);
-      callback([]);
+      this.buttonServices[i - 1] = btn;
     }
+    callback([this.accessory]);
   }
 
   configureAccessory(accessory) {
@@ -333,6 +302,6 @@ class IPortSMButtonsPlatform {
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes)');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX + heartbeat)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
