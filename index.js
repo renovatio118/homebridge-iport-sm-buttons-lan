@@ -23,11 +23,9 @@ class IPortSMButtonsPlatform {
     this.connected = false;
     this.socket = null;
     this.isShuttingDown = false;
-
-    // heartbeat / reconnect throttling
-    this.heartbeatInterval = null;
-    this.lastHeartbeatAck = Date.now();
-    this.lastReconnectLog = 0;
+    this.keepAliveInterval = null;
+    this.reconnectScheduled = false;
+    this.lastHeartbeatAck = 0;
 
     // LIFX client
     this.lifx = new LifxClient();
@@ -80,7 +78,7 @@ class IPortSMButtonsPlatform {
     this.api.on('shutdown', () => {
       this.isShuttingDown = true;
       this.log('Homebridge shutting down, closing socket and HTTP server');
-      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
       if (this.socket) this.socket.destroy();
       if (this.server) this.server.close();
       try { this.lifx.destroy(); } catch (e) {}
@@ -98,22 +96,20 @@ class IPortSMButtonsPlatform {
     this.socket.setTimeout(this.timeout);
 
     this.socket.connect(this.port, this.ip, () => {
-      if (!this.connected && Date.now() - this.lastReconnectLog > 30000) {
-        this.log(`Connected to ${this.ip}:${this.port}`);
-        this.lastReconnectLog = Date.now();
-      }
+      if (!this.connected) this.log(`Connected to ${this.ip}:${this.port}`);
       this.connected = true;
       this.lastHeartbeatAck = Date.now();
+      this.reconnectScheduled = false;
 
-      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 30000); // heartbeat every 30s
+      if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = setInterval(() => this.sendHeartbeat(), 30000);
 
-      this.queryLED();
+      this.queryLED(); // initial query
     });
 
     this.socket.on('data', data => {
       const str = data.toString().trim();
-      this.lastHeartbeatAck = Date.now(); // mark heartbeat received
+      this.lastHeartbeatAck = Date.now(); // heartbeat ack updated
 
       try {
         const json = JSON.parse(str);
@@ -133,44 +129,41 @@ class IPortSMButtonsPlatform {
       }
     });
 
-    this.socket.on('error', () => this.reconnect());
-    this.socket.on('close', () => this.reconnect());
-    this.socket.on('timeout', () => { try { this.socket.destroy(); } catch {} });
+    this.socket.on('error', () => {
+      this.connected = false;
+      this.scheduleReconnectOnce();
+    });
+
+    this.socket.on('close', () => {
+      this.connected = false;
+      this.scheduleReconnectOnce();
+    });
+
+    this.socket.on('timeout', () => {
+      try { this.socket.destroy(); } catch (e) {}
+    });
   }
 
-  // ---------------- Heartbeat / keep-alive ----------------
   sendHeartbeat() {
     if (!this.connected || this.isShuttingDown) return;
 
     const now = Date.now();
-    if (now - this.lastHeartbeatAck > 120000) { // 2 min without response
-      if (now - this.lastReconnectLog > 30000) {
-        this.log('Heartbeat missed — reconnecting');
-        this.lastReconnectLog = now;
-      }
-      this.reconnect();
+    if (now - this.lastHeartbeatAck > 180000) { // 3 minutes timeout
+      this.scheduleReconnectOnce();
       return;
     }
 
-    try { this.socket.write('\rled=?\r'); } catch {}
+    try { this.socket.write('\rled=?\r'); } catch {} // silent heartbeat
   }
 
-  reconnect() {
-    if (this.isShuttingDown) return;
-    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
-
-    if (this.socket) {
-      try { this.socket.destroy(); } catch (e) {}
-      this.socket = null;
-    }
-
-    const now = Date.now();
-    if (now - this.lastReconnectLog > 30000) { // throttle log
-      this.log('Reconnecting to iPort...');
-      this.lastReconnectLog = now;
-    }
-
-    setTimeout(() => { if (!this.isShuttingDown) this.connect(); }, 2000);
+  scheduleReconnectOnce() {
+    if (this.isShuttingDown || this.reconnectScheduled) return;
+    this.reconnectScheduled = true;
+    this.log('Connection lost. Will attempt reconnect in 2 minutes...');
+    setTimeout(() => {
+      this.reconnectScheduled = false;
+      if (!this.isShuttingDown) this.connect();
+    }, 120000);
   }
 
   parseAndSetLedFromString(ledValue) {
@@ -181,7 +174,7 @@ class IPortSMButtonsPlatform {
       const newG = parseInt(padded.substr(3, 3), 10);
       const newB = parseInt(padded.substr(6, 3), 10);
       this.ledColor = { r: newR, g: newG, b: newB };
-    } catch {}
+    } catch (err) {}
   }
 
   // ---------------- Button events ----------------
@@ -250,6 +243,7 @@ class IPortSMButtonsPlatform {
     this.currentColorIndex = (this.currentColorIndex + 1) % this.colorCycle.length;
     const colorName = this.colorCycle[this.currentColorIndex];
     const color = this.modeColors[colorName];
+    this.log(`Button 10 pressed: Cycling to ${colorName}`);
     this.setLED(color.r, color.g, color.b);
   }
 
@@ -261,8 +255,8 @@ class IPortSMButtonsPlatform {
     g = Math.round((g / max) * 255);
     b = Math.round((b / max) * 255);
     for (const mode in this.modeColors) {
-      const modeColor = this.modeColors[mode];
-      if (r === modeColor.r && g === modeColor.g && b === modeColor.b) return mode;
+      const mc = this.modeColors[mode];
+      if (r === mc.r && g === mc.g && b === mc.b) return mode;
     }
     return 'unknown';
   }
@@ -271,7 +265,7 @@ class IPortSMButtonsPlatform {
   setLED(r, g, b) {
     if (!this.connected || this.isShuttingDown) return;
     const cmd = `\rled=${r.toString().padStart(3,'0')}${g.toString().padStart(3,'0')}${b.toString().padStart(3,'0')}\r`;
-    try { this.socket.write(cmd); this.ledColor = { r,g,b }; } catch {}
+    try { this.socket.write(cmd); this.ledColor = { r, g, b }; } catch {}
   }
 
   queryLED() {
@@ -298,7 +292,7 @@ class IPortSMButtonsPlatform {
         this.buttonServices[i - 1] = buttonService;
       }
       callback([this.accessory]);
-    } catch { callback([]); }
+    } catch (e) { callback([]); }
   }
 
   configureAccessory(accessory) { this.accessory = accessory; }
@@ -317,6 +311,6 @@ class IPortSMButtonsPlatform {
 }
 
 module.exports = (api) => {
-  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with heartbeat)');
+  console.log('Registering IPortSMButtonsLAN platform (LIFX only, with silent heartbeat)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
