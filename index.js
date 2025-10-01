@@ -232,20 +232,19 @@ class IPortSMButtonsPlatform {
     this.healthCheckInterval = setInterval(() => {
       if (this.connected && !this.isShuttingDown) {
         const timeSinceLastData = Date.now() - (this.lastDataReceived || 0);
-        const timeSinceLastKeepAlive = Date.now() - (this.lastKeepAliveSent || 0);
         
-        // If no data received in 60 seconds, force reconnection
-        if (timeSinceLastData > 60000) {
-          this.log('Health check failed - no data received in 60 seconds, reconnecting...');
+        // If no data received in 90 seconds, force reconnection
+        if (timeSinceLastData > 90000) {
+          this.log('Health check failed - no data received in 90 seconds, reconnecting...');
           this.handleDisconnection();
         }
-        // If we sent a keep-alive but got no response in 30 seconds
-        else if (timeSinceLastKeepAlive > 0 && timeSinceLastKeepAlive < 30000 && timeSinceLastData > timeSinceLastKeepAlive + 10000) {
-          this.log('Health check warning - keep-alive not acknowledged, sending test query...');
+        // If we sent a keep-alive but got no response in 45 seconds
+        else if (timeSinceLastData > 45000) {
+          this.log('Health check warning no recent data, sending test query...');
           this.queryLED();
         }
       }
-    }, 30000); // Check every 30 seconds
+    }, 45000); // Check every 45 seconds
   }
 
   cleanupConnection() {
@@ -445,3 +444,4 @@ module.exports = (api) => {
   console.log('Registering IPortSMButtonsLAN platform (LIFX only, with LED modes)');
   api.registerPlatform('homebridge-iport-sm-buttons-lan', 'IPortSMButtonsLAN', IPortSMButtonsPlatform);
 };
+
